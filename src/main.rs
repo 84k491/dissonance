@@ -26,6 +26,8 @@ enum Message {
 struct DissonanceApp {
     tree: Vec<FsNode>,
     selected: Option<PathBuf>,
+    source: Option<PathBuf>,
+    destination: Option<PathBuf>,
 }
 
 impl Application for DissonanceApp {
@@ -35,10 +37,15 @@ impl Application for DissonanceApp {
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
+        let s = PathBuf::from("/home/bakar/tmp/mu/source");
+        let d = PathBuf::from("/home/bakar/tmp/mu/dest");
+
         (
             Self {
                 tree: Vec::new(),
                 selected: None,
+                source: Some(s),
+                destination: Some(d),
             },
             Command::perform(
                 load_dir(std::env::current_dir().unwrap()),
@@ -48,7 +55,7 @@ impl Application for DissonanceApp {
     }
 
     fn title(&self) -> String {
-        "Iced File Tree".into()
+        "Dissonance".into()
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
@@ -71,7 +78,7 @@ impl Application for DissonanceApp {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let top_panel = render_top_panel();
+        let top_panel = self.render_top_panel();
         let main_panel = self.render_main_panel();
 
         column![
@@ -92,6 +99,31 @@ impl Application for DissonanceApp {
 }
 
 impl DissonanceApp {
+    fn render_top_panel(&self) -> iced::widget::Row<'static, Message> {
+        let source_str: Option<String> = self
+            .source
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+
+        let dest_str: Option<String> = self
+            .destination
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+
+        let targets = column![
+            text(format!(
+                "Source: {}",
+                source_str.unwrap_or_else(|| String::from("<unset>"))
+            )),
+            text(format!(
+                "Destination: {}",
+                dest_str.unwrap_or_else(|| String::from("<unset>"))
+            )),
+        ];
+
+        row![targets]
+    }
+
     fn render_main_panel(&self) -> iced::widget::Row<'_, Message> {
         let tree_view = scrollable(render_tree(&self.tree, 0))
             .height(Length::Fill)
@@ -295,10 +327,6 @@ fn render_tree(nodes: &[FsNode], indent: usize) -> iced::widget::Column<'_, Mess
     }
 
     col
-}
-
-fn render_top_panel() -> iced::widget::Row<'static, Message> {
-    row![]
 }
 
 fn render_info_panel(line: String) -> iced::widget::Container<'static, Message> {
