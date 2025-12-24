@@ -18,6 +18,7 @@ struct FsNode {
 
 #[derive(Debug, Clone)]
 enum Message {
+    SourceSet(PathBuf),
     RootLoaded(Vec<FsNode>),
     ToggleDir(PathBuf),
     SelectFile(PathBuf),
@@ -47,10 +48,7 @@ impl Application for DissonanceApp {
                 source: Some(s),
                 destination: Some(d),
             },
-            Command::perform(
-                load_dir(std::env::current_dir().unwrap()),
-                Message::RootLoaded,
-            ),
+            Command::perform(get_source(), Message::SourceSet),
         )
     }
 
@@ -60,6 +58,8 @@ impl Application for DissonanceApp {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
+            Message::SourceSet(nodes) => Command::perform(load_dir(nodes), Message::RootLoaded),
+
             Message::RootLoaded(nodes) => {
                 self.tree = nodes;
                 Command::none()
@@ -154,6 +154,11 @@ impl DissonanceApp {
                 .width(Length::FillPortion(1))
         ]
     }
+}
+
+async fn get_source() -> PathBuf {
+    let s = PathBuf::from("/home/bakar/tmp/mu/source");
+    s
 }
 
 async fn load_dir(path: PathBuf) -> Vec<FsNode> {
