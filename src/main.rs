@@ -5,12 +5,7 @@ use iced::{
 use std::path::{Path, PathBuf};
 
 fn main() -> iced::Result {
-    FileBrowser::run(Settings::default())
-}
-
-struct FileBrowser {
-    tree: Vec<FsNode>,
-    selected: Option<PathBuf>,
+    DissonanceApp::run(Settings::default())
 }
 
 #[derive(Debug, Clone)]
@@ -28,7 +23,12 @@ enum Message {
     SelectFile(PathBuf),
 }
 
-impl Application for FileBrowser {
+struct DissonanceApp {
+    tree: Vec<FsNode>,
+    selected: Option<PathBuf>,
+}
+
+impl Application for DissonanceApp {
     type Executor = executor::Default;
     type Message = Message;
     type Theme = Theme;
@@ -71,6 +71,28 @@ impl Application for FileBrowser {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let top_panel = render_top_panel();
+        let main_panel = self.render_main_panel();
+
+        column![
+            container(top_panel)
+                .height(Length::FillPortion(1))
+                .width(Length::Fill)
+                .style(iced::theme::Container::Custom(Box::new(PaneStyle::Left)))
+                .padding(10),
+            container(main_panel)
+                .height(Length::FillPortion(6))
+                .width(Length::Fill)
+                .style(iced::theme::Container::Custom(Box::new(PaneStyle::Right)))
+                .padding(10),
+        ]
+        .height(Length::Fill)
+        .into()
+    }
+}
+
+impl DissonanceApp {
+    fn render_main_panel(&self) -> iced::widget::Row<'_, Message> {
         let tree_view = scrollable(render_tree(&self.tree, 0))
             .height(Length::Fill)
             .width(Length::Fill);
@@ -81,20 +103,24 @@ impl Application for FileBrowser {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "No file selected".into());
 
-        let right_panel = render_right_panel(line);
+        let info_panel = render_info_panel(line);
+        let actions_panel = render_actions_panel();
 
         row![
             container(tree_view)
+                .padding(10)
+                .height(Length::Fill)
                 .width(Length::FillPortion(1))
+                .style(iced::theme::Container::Custom(Box::new(TreePanelStyle {}))),
+            container(info_panel)
                 .padding(10)
-                .style(iced::theme::Container::Custom(Box::new(PaneStyle::Left))),
-            container(right_panel)
-                .width(Length::FillPortion(3))
+                .height(Length::Fill)
+                .width(Length::FillPortion(4)),
+            container(actions_panel)
                 .padding(10)
-                .style(iced::theme::Container::Custom(Box::new(PaneStyle::Right))),
+                .height(Length::Fill)
+                .width(Length::FillPortion(1))
         ]
-        .height(Length::Fill)
-        .into()
     }
 }
 
@@ -187,6 +213,54 @@ impl container::StyleSheet for PaneStyle {
     }
 }
 
+struct ActionPanelStyle {}
+impl container::StyleSheet for ActionPanelStyle {
+    type Style = Theme;
+    fn appearance(&self, _style: &Theme) -> container::Appearance {
+        container::Appearance {
+            background: Some(Background::Color(Color::from_rgb(0.80, 0.40, 0.30))),
+            border: iced::Border {
+                color: Color::BLACK,
+                width: 2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+struct InfoPanelStyle {}
+impl container::StyleSheet for InfoPanelStyle {
+    type Style = Theme;
+    fn appearance(&self, _style: &Theme) -> container::Appearance {
+        container::Appearance {
+            background: Some(Background::Color(Color::from_rgb(0.60, 0.70, 0.10))),
+            border: iced::Border {
+                color: Color::BLACK,
+                width: 2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+struct TreePanelStyle {}
+impl container::StyleSheet for TreePanelStyle {
+    type Style = Theme;
+    fn appearance(&self, _style: &Theme) -> container::Appearance {
+        container::Appearance {
+            background: Some(Background::Color(Color::from_rgb(0.70, 0.70, 0.70))),
+            border: iced::Border {
+                color: Color::BLACK,
+                width: 2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
 fn render_tree(nodes: &[FsNode], indent: usize) -> iced::widget::Column<'_, Message> {
     let mut col = column!().spacing(4);
 
@@ -223,21 +297,26 @@ fn render_tree(nodes: &[FsNode], indent: usize) -> iced::widget::Column<'_, Mess
     col
 }
 
-fn render_right_panel(line: String) -> iced::widget::Column<'static, Message> {
-    column![
-        container(text(line.clone()).size(16))
-            .padding(20)
-            .width(Length::Fill)
-            .height(Length::FillPortion(4))
-            .align_x(alignment::Horizontal::Left)
-            .align_y(alignment::Vertical::Top)
-            .style(iced::theme::Container::Custom(Box::new(PaneStyle::Left))),
-        container(text(line.clone()).size(16))
-            .padding(20)
-            .width(Length::Fill)
-            .height(Length::FillPortion(1))
-            .align_x(alignment::Horizontal::Left)
-            .align_y(alignment::Vertical::Top)
-            .style(iced::theme::Container::Custom(Box::new(PaneStyle::Right))),
-    ]
+fn render_top_panel() -> iced::widget::Row<'static, Message> {
+    row![]
+}
+
+fn render_info_panel(line: String) -> iced::widget::Container<'static, Message> {
+    container(text(line.clone()).size(16))
+        .width(Length::Fill)
+        .height(Length::FillPortion(1))
+        .align_x(alignment::Horizontal::Left)
+        .align_y(alignment::Vertical::Top)
+        .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
+}
+
+fn render_actions_panel() -> iced::widget::Container<'static, Message> {
+    container(text("Actions").size(16))
+        .width(Length::Fill)
+        .height(Length::FillPortion(1))
+        .align_x(alignment::Horizontal::Left)
+        .align_y(alignment::Vertical::Top)
+        .style(iced::theme::Container::Custom(Box::new(
+            ActionPanelStyle {},
+        )))
 }
