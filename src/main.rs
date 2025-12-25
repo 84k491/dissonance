@@ -2,6 +2,7 @@ use iced::{
     Application, Command, Element, Length, Settings, Theme, alignment, executor,
     widget::{button, column, container, row, scrollable, text},
 };
+use pathdiff::diff_paths;
 use std::path::{Path, PathBuf};
 
 mod music_file;
@@ -12,23 +13,22 @@ fn main() -> iced::Result {
 }
 
 #[derive(Debug, Clone)]
-struct FsNode {
-    path: PathBuf,
-    is_dir: bool,
-    expanded: bool,
-    children: Vec<FsNode>,
+enum FsEntry {
+    FsFile(File),
+    FsMusicFile(MusicFile),
+    FsDirectory(Directory),
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     SourceSet(PathBuf),
-    RootLoaded(Vec<FsNode>),
+    RootLoaded(Vec<FsEntry>),
     ToggleDir(PathBuf),
     SelectFile(PathBuf),
 }
 
 struct DissonanceApp {
-    tree: Vec<FsNode>,
+    tree: Vec<FsEntry>,
     selected: Option<PathBuf>,
     source: Option<PathBuf>,
     destination: Option<PathBuf>,
@@ -61,7 +61,9 @@ impl Application for DissonanceApp {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
-            Message::SourceSet(nodes) => Command::perform(load_dir(nodes), Message::RootLoaded),
+            Message::SourceSet(root_path) => {
+                Command::perform(load_root_dir(root_path.clone(), root_path), Message::RootLoaded)
+            }
 
             Message::RootLoaded(nodes) => {
                 self.tree = nodes;
@@ -100,7 +102,6 @@ impl Application for DissonanceApp {
         .into()
     }
 }
-
 impl DissonanceApp {
     fn render_top_panel(&self) -> iced::widget::Row<'static, Message> {
         let source_str: Option<String> = self
@@ -186,63 +187,72 @@ async fn get_source() -> PathBuf {
     s
 }
 
-async fn load_dir(path: PathBuf) -> Vec<FsNode> {
-    let mut nodes = Vec::new();
+async fn load_root_dir(root_path: PathBuf, target_rel_path: PathBuf) -> Vec<FsEntry> {
+    return load_dir(root_path, target_rel_path);
+}
 
-    if let Ok(read_dir) = std::fs::read_dir(path) {
-        for entry in read_dir.flatten() {
-            let path = entry.path();
-            let is_dir = path.is_dir();
+fn load_dir(root_path: PathBuf, target_rel_path: PathBuf) -> Vec<FsEntry> {
+    let mut nodes = Vec::<FsEntry>::new();
+    let target_abs_path = root_path.join(&target_rel_path);
 
-            nodes.push(FsNode {
-                path,
-                is_dir,
-                expanded: false,
-                children: Vec::new(),
-            });
+    let read_dir = std::fs::read_dir(&target_abs_path);
+    if let Err(_) = read_dir {
+        return vec![];
+    }
+
+    let read_dir = read_dir.unwrap();
+
+    for entry in read_dir {
+        if let Err(_) = entry {
+            continue;
+        }
+
+        let absolute_path = entry.unwrap().path();
+        let is_dir = absolute_path.is_dir();
+        let relative_path = diff_paths(&absolute_path, &root_path)
+            .expect("Can't create relative path")
+            .to_path_buf();
+
+        if is_dir {
+            let children = load_dir(root_path.clone(), relative_path.clone());
+            let d = Directory::new(&root_path, relative_path, children);
+            nodes.push(FsEntry::FsDirectory(d));
+        } else {
+            let f = File::new(&root_path, &relative_path);
+            let mf = MusicFile::from(f.clone());
+
+            match mf {
+                None => {
+                    nodes.push(FsEntry::FsFile(f));
+                }
+                Some(mf) => {
+                    nodes.push(FsEntry::FsMusicFile(mf));
+                }
+            };
         }
     }
 
-    nodes.sort_by_key(|n| (!n.is_dir, n.path.clone()));
     nodes
 }
 
-/* =========================
-Tree Helpers
-========================= */
-
-fn toggle_dir(nodes: &mut [FsNode], target: &Path) {
+fn toggle_dir(nodes: &mut Vec<FsEntry>, target: &Path) {
     for node in nodes {
-        if node.path == target && node.is_dir {
-            if !node.expanded {
-                if let Ok(read_dir) = std::fs::read_dir(&node.path) {
-                    node.children = read_dir
-                        .flatten()
-                        .map(|e| {
-                            let path = e.path();
-                            FsNode {
-                                is_dir: path.is_dir(),
-                                path,
-                                expanded: false,
-                                children: Vec::new(),
-                            }
-                        })
-                        .collect();
+        match node {
+            FsEntry::FsDirectory(d) => {
+                if d.relative_path == target {
+                    d.expanded = !d.expanded;
+                } else {
+                    toggle_dir(&mut d.children, target);
                 }
             }
-            node.expanded = !node.expanded;
-            return;
-        }
-
-        if node.expanded {
-            toggle_dir(&mut node.children, target);
-        }
+            _ => continue,
+        };
     }
 }
 
 use iced::{Background, Color};
 
-use crate::music_file::music_file::MusicFile;
+use crate::music_file::music_file::{Directory, File, MusicFile};
 
 #[derive(Debug, Clone, Copy)]
 enum PaneStyle {
@@ -325,37 +335,51 @@ impl container::StyleSheet for TreePanelStyle {
     }
 }
 
-fn render_tree(nodes: &[FsNode], indent: usize) -> iced::widget::Column<'_, Message> {
+fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, Message> {
     let mut col = column!().spacing(4);
 
     for node in nodes {
-        let name = node
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| node.path.display().to_string());
+        let rel_path = match node {
+            FsEntry::FsFile(f) => &f.relative_path,
+            FsEntry::FsMusicFile(mf) => &mf.relative_path,
+            FsEntry::FsDirectory(d) => &d.relative_path,
+        };
+        let name = rel_path.file_name().unwrap().to_string_lossy().to_string();
 
-        let label = if node.is_dir {
-            if node.expanded {
-                format!("V {}", name)
-            } else {
-                format!("> {}", name)
+        let label = match node {
+            FsEntry::FsFile(_) => format!("  {}", name),
+            FsEntry::FsMusicFile(_) => format!("  {}", name),
+            FsEntry::FsDirectory(d) => {
+                if d.expanded {
+                    format!("V {}", name)
+                } else {
+                    format!("> {}", name)
+                }
             }
-        } else {
-            format!("  {}", name)
         };
 
-        let button = if node.is_dir {
-            button(text(label)).on_press(Message::ToggleDir(node.path.clone()))
-        } else {
-            button(text(label)).on_press(Message::SelectFile(node.path.clone()))
+        let button = match node {
+            FsEntry::FsFile(f) => {
+                button(text(label)).on_press(Message::SelectFile(f.relative_path.clone()))
+            }
+            FsEntry::FsMusicFile(f) => {
+                button(text(label)).on_press(Message::SelectFile(f.relative_path.clone()))
+            }
+            FsEntry::FsDirectory(d) => {
+                button(text(label)).on_press(Message::ToggleDir(d.relative_path.clone()))
+            }
         };
 
         col = col.push(container(button).padding([0, 0, 0, (indent as u16) * 16]));
 
-        if node.is_dir && node.expanded {
-            col = col.push(render_tree(&node.children, indent + 1));
-        }
+        match node {
+            FsEntry::FsDirectory(d) => {
+                if d.expanded {
+                    col = col.push(render_tree(&d.children, indent + 1));
+                }
+            }
+            _ => {}
+        };
     }
 
     col
