@@ -148,7 +148,7 @@ impl Application for DissonanceApp {
                 Command::none()
             }
             Message::FixTags(rel_path) => {
-                println!("FixTags: {}", rel_path.to_string_lossy());
+                self.fix_tags(rel_path);
                 Command::none()
             }
             Message::MoveFile(rel_path) => {
@@ -226,7 +226,9 @@ impl DissonanceApp {
                 .padding(10)
                 .height(Length::Fill)
                 .width(Length::FillPortion(1))
-                .style(iced::theme::Container::Custom(Box::new(ActionPanelStyle {}))),
+                .style(iced::theme::Container::Custom(Box::new(
+                    ActionPanelStyle {}
+                ))),
         ]
     }
 
@@ -331,6 +333,39 @@ impl DissonanceApp {
         .align_y(alignment::Vertical::Top)
         .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
     }
+
+    fn fix_tags(&self, path: PathBuf) {
+        if self.source.is_none() || self.selected.is_none() {
+            return;
+        }
+
+        let mf_ref = find_file(&self.tree, path);
+        if mf_ref.is_none() {
+            return;
+        }
+        let mf = mf_ref.unwrap();
+
+        let tags = mf.compose_tags_from_path();
+        mf.set_tags(&tags);
+
+        println!("Tags set for: {}", mf.relative_path.display());
+    }
+}
+
+fn find_file(tree: &Vec<FsEntry>, path: PathBuf) -> Option<&MusicFile> {
+    for entry in tree {
+        if let FsEntry::FsMusicFile(mf) = entry {
+            if mf.relative_path == path {
+                return Some(&mf);
+            }
+        }
+        if let FsEntry::FsDirectory(d) = entry {
+            if let Some(mf) = find_file(&d.children, path.clone()) {
+                return Some(mf);
+            }
+        }
+    }
+    return None;
 }
 
 fn find_problems(mf: &MusicFile) -> Vec<Problem> {
@@ -341,7 +376,8 @@ fn find_problems(mf: &MusicFile) -> Vec<Problem> {
     }
 
     let installed_tags = mf.tags();
-    let path_tags = mf.compose_tags_from_path();
+    let mut path_tags = mf.compose_tags_from_path();
+    path_tags.track_number = installed_tags.track_number.clone();
 
     if path_tags != installed_tags {
         ret.push(Problem::MismatchedTags);
