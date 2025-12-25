@@ -4,6 +4,9 @@ use iced::{
 };
 use std::path::{Path, PathBuf};
 
+mod music_file;
+mod tags;
+
 fn main() -> iced::Result {
     DissonanceApp::run(Settings::default())
 }
@@ -129,13 +132,7 @@ impl DissonanceApp {
             .height(Length::Fill)
             .width(Length::Fill);
 
-        let line = self
-            .selected
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "No file selected".into());
-
-        let info_panel = render_info_panel(line);
+        let info_panel = self.render_info_panel();
         let actions_panel = render_actions_panel();
 
         row![
@@ -153,6 +150,34 @@ impl DissonanceApp {
                 .height(Length::Fill)
                 .width(Length::FillPortion(1))
         ]
+    }
+
+    fn render_info_panel(&self) -> iced::widget::Container<'static, Message> {
+        if self.source.is_none() || self.selected.is_none() {
+            return container(text("No file selected"));
+        }
+
+        let mf = MusicFile::new(
+            &self.source.as_ref().unwrap(),
+            &self.selected.as_ref().unwrap(),
+        );
+        if mf.is_none() {
+            return container(text("Not a music file"));
+        }
+        let mf = mf.unwrap();
+
+        let tags = mf.tags();
+
+        container(column!(
+            text(tags.artist).size(16),
+            text(tags.album).size(16),
+            text(tags.title).size(16)
+        ))
+        .width(Length::Fill)
+        .height(Length::FillPortion(1))
+        .align_x(alignment::Horizontal::Left)
+        .align_y(alignment::Vertical::Top)
+        .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
     }
 }
 
@@ -216,6 +241,8 @@ fn toggle_dir(nodes: &mut [FsNode], target: &Path) {
 }
 
 use iced::{Background, Color};
+
+use crate::music_file::music_file::MusicFile;
 
 #[derive(Debug, Clone, Copy)]
 enum PaneStyle {
@@ -332,15 +359,6 @@ fn render_tree(nodes: &[FsNode], indent: usize) -> iced::widget::Column<'_, Mess
     }
 
     col
-}
-
-fn render_info_panel(line: String) -> iced::widget::Container<'static, Message> {
-    container(text(line.clone()).size(16))
-        .width(Length::Fill)
-        .height(Length::FillPortion(1))
-        .align_x(alignment::Horizontal::Left)
-        .align_y(alignment::Vertical::Top)
-        .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
 }
 
 fn render_actions_panel() -> iced::widget::Container<'static, Message> {

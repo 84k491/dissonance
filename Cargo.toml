@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 iced = { version = "0.12", features = ["tokio"] }
+audiotags = "0.5.0"
+walkdir = "2.2.9"
+pathdiff = "0.2.2"
+remove_empty_subdirs = "0.1.1"
