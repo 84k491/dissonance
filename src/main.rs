@@ -2,6 +2,9 @@ use iced::{
     Application, Command, Element, Length, Settings, Theme, alignment, executor,
     widget::{Column, button, column, container, row, scrollable, text},
 };
+use iced::{Background, Color};
+
+use crate::music_file::music_file::{Directory, File, MusicFile};
 use pathdiff::diff_paths;
 use std::{
     fmt::{self, Display},
@@ -22,12 +25,38 @@ enum FsEntry {
     FsDirectory(Directory),
 }
 
+impl FsEntry {
+    fn from(root_path: &PathBuf, relative_path: &PathBuf) -> FsEntry {
+        let abs_path = root_path.clone().join(&relative_path);
+
+        if abs_path.is_dir() {
+            let children = load_dir(root_path.clone(), relative_path.clone());
+            let d = Directory::new(&root_path, relative_path, children);
+            return FsEntry::FsDirectory(d);
+        } else {
+            let f = File::new(&root_path, &relative_path);
+            let mf = MusicFile::from(f.clone());
+
+            match mf {
+                None => {
+                    return FsEntry::FsFile(f);
+                }
+                Some(mf) => {
+                    return FsEntry::FsMusicFile(mf);
+                }
+            };
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     SourceSet(PathBuf),
     RootLoaded(Vec<FsEntry>),
     ToggleDir(PathBuf),
     SelectFile(PathBuf),
+    FixTags(PathBuf),
+    MoveFile(PathBuf),
 }
 
 struct DissonanceApp {
@@ -45,7 +74,28 @@ enum Problem {
     // MissingAlbumArt,
 }
 
+fn action_to_message(action: Action, rel_path: PathBuf) -> Message {
+    match action {
+        Action::FixTags => Message::FixTags(rel_path),
+        Action::MoveFile => Message::MoveFile(rel_path),
+    }
+}
+
 impl Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Action {
+    FixTags,
+    MoveFile,
+    // GetAlbumArt,
+    // ApplyCustomTags,
+}
+
+impl Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
     }
@@ -95,6 +145,14 @@ impl Application for DissonanceApp {
 
             Message::SelectFile(path) => {
                 self.selected = Some(path);
+                Command::none()
+            }
+            Message::FixTags(rel_path) => {
+                println!("FixTags: {}", rel_path.to_string_lossy());
+                Command::none()
+            }
+            Message::MoveFile(rel_path) => {
+                println!("MoveFile: {}", rel_path.to_string_lossy());
                 Command::none()
             }
         }
@@ -152,7 +210,7 @@ impl DissonanceApp {
             .width(Length::Fill);
 
         let info_panel = self.render_info_panel();
-        let actions_panel = render_actions_panel();
+        let actions_panel = self.render_actions_panel();
 
         row![
             container(tree_view)
@@ -168,6 +226,7 @@ impl DissonanceApp {
                 .padding(10)
                 .height(Length::Fill)
                 .width(Length::FillPortion(1))
+                .style(iced::theme::Container::Custom(Box::new(ActionPanelStyle {}))),
         ]
     }
 
@@ -186,25 +245,21 @@ impl DissonanceApp {
         if self.source.is_none() || self.selected.is_none() {
             return column![];
         }
-        let selected = self.selected.clone().unwrap();
-        let selected_absolute = self.source.clone().unwrap().join(selected);
-
-        if !selected_absolute.is_file() {
-            return column![];
-        }
-
-        let file = File::new(
-            &self.source.as_ref().unwrap(),
-            &self.selected.as_ref().unwrap(),
+        let entry = FsEntry::from(
+            self.source.as_ref().unwrap(),
+            self.selected.as_ref().unwrap(),
         );
 
-        let mf = MusicFile::from(file);
-        if mf.is_none() {
-            return column![];
-        }
-        let mf = mf.unwrap();
+        let problems = match entry {
+            FsEntry::FsFile(_) => {
+                vec![]
+            }
+            FsEntry::FsDirectory(_) => {
+                vec![]
+            }
+            FsEntry::FsMusicFile(mf) => find_problems(&mf),
+        };
 
-        let problems = Self::find_problems(&mf);
         if problems.is_empty() {
             return column![];
         }
@@ -214,6 +269,39 @@ impl DissonanceApp {
         });
 
         return column;
+    }
+
+    fn render_actions_panel(&self) -> iced::widget::Column<'static, Message> {
+        if self.source.is_none() || self.selected.is_none() {
+            return column![];
+        }
+        let entry = FsEntry::from(
+            self.source.as_ref().unwrap(),
+            self.selected.as_ref().unwrap(),
+        );
+
+        let problems = match entry {
+            FsEntry::FsFile(_) => {
+                vec![]
+            }
+            FsEntry::FsDirectory(_) => {
+                vec![]
+            }
+            FsEntry::FsMusicFile(mf) => find_problems(&mf),
+        };
+
+        let actions = get_suitable_actions(problems);
+
+        let column = actions.iter().fold(Column::new().spacing(4), |col, a| {
+            col.push(
+                button(text(a.to_string()).size(16)).on_press(action_to_message(
+                    (*a).clone(),
+                    self.selected.clone().unwrap(),
+                )),
+            )
+        });
+
+        column
     }
 
     fn render_file_panel(&self) -> iced::widget::Container<'static, Message> {
@@ -243,29 +331,29 @@ impl DissonanceApp {
         .align_y(alignment::Vertical::Top)
         .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
     }
+}
 
-    fn find_problems(mf: &MusicFile) -> Vec<Problem> {
-        let mut ret = Vec::<Problem>::new();
+fn find_problems(mf: &MusicFile) -> Vec<Problem> {
+    let mut ret = Vec::<Problem>::new();
 
-        if !mf.tag_available() {
-            ret.push(Problem::MissingTags);
-        }
-
-        let installed_tags = mf.tags();
-        let path_tags = mf.compose_tags_from_path();
-
-        if path_tags != installed_tags {
-            ret.push(Problem::MismatchedTags);
-        }
-
-        let tags_path = mf.compose_path_from_tags(&installed_tags);
-
-        if mf.relative_path != tags_path {
-            ret.push(Problem::MismatchedPath);
-        }
-
-        return ret;
+    if !mf.tag_available() {
+        ret.push(Problem::MissingTags);
     }
+
+    let installed_tags = mf.tags();
+    let path_tags = mf.compose_tags_from_path();
+
+    if path_tags != installed_tags {
+        ret.push(Problem::MismatchedTags);
+    }
+
+    let tags_path = mf.compose_path_from_tags(&installed_tags);
+
+    if mf.relative_path != tags_path {
+        ret.push(Problem::MismatchedPath);
+    }
+
+    return ret;
 }
 
 async fn get_source() -> PathBuf {
@@ -294,28 +382,12 @@ fn load_dir(root_path: PathBuf, target_rel_path: PathBuf) -> Vec<FsEntry> {
         }
 
         let absolute_path = entry.unwrap().path();
-        let is_dir = absolute_path.is_dir();
         let relative_path = diff_paths(&absolute_path, &root_path)
             .expect("Can't create relative path")
             .to_path_buf();
 
-        if is_dir {
-            let children = load_dir(root_path.clone(), relative_path.clone());
-            let d = Directory::new(&root_path, relative_path, children);
-            nodes.push(FsEntry::FsDirectory(d));
-        } else {
-            let f = File::new(&root_path, &relative_path);
-            let mf = MusicFile::from(f.clone());
-
-            match mf {
-                None => {
-                    nodes.push(FsEntry::FsFile(f));
-                }
-                Some(mf) => {
-                    nodes.push(FsEntry::FsMusicFile(mf));
-                }
-            };
-        }
+        let e = FsEntry::from(&root_path, &relative_path);
+        nodes.push(e);
     }
 
     nodes
@@ -335,10 +407,6 @@ fn toggle_dir(nodes: &mut Vec<FsEntry>, target: &Path) {
         };
     }
 }
-
-use iced::{Background, Color};
-
-use crate::music_file::music_file::{Directory, File, MusicFile};
 
 #[derive(Debug, Clone, Copy)]
 enum PaneStyle {
@@ -471,13 +539,19 @@ fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, 
     col
 }
 
-fn render_actions_panel() -> iced::widget::Container<'static, Message> {
-    container(text("Actions").size(16))
-        .width(Length::Fill)
-        .height(Length::FillPortion(1))
-        .align_x(alignment::Horizontal::Left)
-        .align_y(alignment::Vertical::Top)
-        .style(iced::theme::Container::Custom(Box::new(
-            ActionPanelStyle {},
-        )))
+fn get_suitable_actions(problems: Vec<Problem>) -> Vec<Action> {
+    let mut actions = Vec::new();
+    for p in problems {
+        match p {
+            Problem::MissingTags => {
+                actions.push(Action::FixTags);
+            }
+            Problem::MismatchedTags | Problem::MismatchedPath => {
+                actions.push(Action::FixTags);
+                actions.push(Action::MoveFile);
+            }
+        }
+    }
+
+    actions
 }

@@ -205,7 +205,7 @@ pub mod music_file {
         pub expanded: bool, // TODO this is from view, not from model, move it
     }
     impl Directory {
-        pub fn new(base: &PathBuf, relative_path: PathBuf, children: Vec<FsEntry>) -> Directory {
+        pub fn new(base: &PathBuf, relative_path: &PathBuf, children: Vec<FsEntry>) -> Directory {
             let ret = Directory {
                 base_path: base.clone(),
                 relative_path: relative_path.clone(),
