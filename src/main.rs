@@ -1,9 +1,12 @@
 use iced::{
     Application, Command, Element, Length, Settings, Theme, alignment, executor,
-    widget::{button, column, container, row, scrollable, text},
+    widget::{Column, button, column, container, row, scrollable, text},
 };
 use pathdiff::diff_paths;
-use std::path::{Path, PathBuf};
+use std::{
+    fmt::{self, Display},
+    path::{Path, PathBuf},
+};
 
 mod music_file;
 mod tags;
@@ -34,6 +37,20 @@ struct DissonanceApp {
     destination: Option<PathBuf>,
 }
 
+#[derive(Debug)]
+enum Problem {
+    MissingTags,
+    MismatchedTags,
+    MismatchedPath,
+    // MissingAlbumArt,
+}
+
+impl Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 impl Application for DissonanceApp {
     type Executor = executor::Default;
     type Message = Message;
@@ -61,9 +78,10 @@ impl Application for DissonanceApp {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
-            Message::SourceSet(root_path) => {
-                Command::perform(load_root_dir(root_path.clone(), root_path), Message::RootLoaded)
-            }
+            Message::SourceSet(root_path) => Command::perform(
+                load_root_dir(root_path.clone(), root_path),
+                Message::RootLoaded,
+            ),
 
             Message::RootLoaded(nodes) => {
                 self.tree = nodes;
@@ -153,7 +171,52 @@ impl DissonanceApp {
         ]
     }
 
-    fn render_info_panel(&self) -> iced::widget::Container<'static, Message> {
+    fn render_info_panel(&self) -> iced::widget::Column<'static, Message> {
+        column![
+            container(self.render_file_panel())
+                .width(Length::Fill)
+                .height(Length::FillPortion(3)),
+            container(self.render_problems_panel())
+                .width(Length::Fill)
+                .height(Length::FillPortion(1)),
+        ]
+    }
+
+    fn render_problems_panel(&self) -> iced::widget::Column<'static, Message> {
+        if self.source.is_none() || self.selected.is_none() {
+            return column![];
+        }
+        let selected = self.selected.clone().unwrap();
+        let selected_absolute = self.source.clone().unwrap().join(selected);
+
+        if !selected_absolute.is_file() {
+            return column![];
+        }
+
+        let file = File::new(
+            &self.source.as_ref().unwrap(),
+            &self.selected.as_ref().unwrap(),
+        );
+
+        let mf = MusicFile::from(file);
+        if mf.is_none() {
+            return column![];
+        }
+        let mf = mf.unwrap();
+
+        let problems = Self::find_problems(&mf);
+        if problems.is_empty() {
+            return column![];
+        }
+
+        let column = problems.iter().fold(Column::new().spacing(4), |col, p| {
+            col.push(text(p.to_string()).size(16))
+        });
+
+        return column;
+    }
+
+    fn render_file_panel(&self) -> iced::widget::Container<'static, Message> {
         if self.source.is_none() || self.selected.is_none() {
             return container(text("No file selected"));
         }
@@ -179,6 +242,29 @@ impl DissonanceApp {
         .align_x(alignment::Horizontal::Left)
         .align_y(alignment::Vertical::Top)
         .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
+    }
+
+    fn find_problems(mf: &MusicFile) -> Vec<Problem> {
+        let mut ret = Vec::<Problem>::new();
+
+        if !mf.tag_available() {
+            ret.push(Problem::MissingTags);
+        }
+
+        let installed_tags = mf.tags();
+        let path_tags = mf.compose_tags_from_path();
+
+        if path_tags != installed_tags {
+            ret.push(Problem::MismatchedTags);
+        }
+
+        let tags_path = mf.compose_path_from_tags(&installed_tags);
+
+        if mf.relative_path != tags_path {
+            ret.push(Problem::MismatchedPath);
+        }
+
+        return ret;
     }
 }
 

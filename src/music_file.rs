@@ -61,7 +61,7 @@ pub mod music_file {
             return None;
         }
 
-        fn tag_available(&self) -> bool {
+        pub fn tag_available(&self) -> bool {
             let mut full_path = self.base_path.clone();
             full_path.push(&self.relative_path);
             let tag = Tag::new().read_from_path(full_path);
