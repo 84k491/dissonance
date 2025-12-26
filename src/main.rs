@@ -8,6 +8,7 @@ use crate::music_file::music_file::{Directory, File, MusicFile};
 use pathdiff::diff_paths;
 use std::{
     fmt::{self, Display},
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -152,7 +153,7 @@ impl Application for DissonanceApp {
                 Command::none()
             }
             Message::MoveFile(rel_path) => {
-                println!("MoveFile: {}", rel_path.to_string_lossy());
+                self.move_file(rel_path);
                 Command::none()
             }
         }
@@ -347,16 +348,63 @@ impl DissonanceApp {
 
         let tags = mf.compose_tags_from_path();
         mf.set_tags(&tags);
+    }
 
-        println!("Tags set for: {}", mf.relative_path.display());
+    fn move_file(&mut self, path: PathBuf) {
+        let mf_ref = find_file(&self.tree, path);
+        if mf_ref.is_none() {
+            return;
+        }
+        let file = mf_ref.unwrap();
+
+        let mut source_full_path = self.source.clone().unwrap().to_path_buf();
+        source_full_path.push(&file.relative_path);
+
+        let mut target_full_path = self.source.clone().unwrap().to_path_buf();
+        let tag_based_rel_path = file.compose_path_from_tags(&file.tags());
+        target_full_path.push(tag_based_rel_path.clone());
+
+        let _ = fs::create_dir_all(target_full_path.parent().unwrap());
+        let move_res = fs::rename(&source_full_path, &target_full_path);
+        if let Err(err) = move_res {
+            println!("Moving to {:?} failed, err: {}", target_full_path, err);
+            return;
+        }
+
+        if !replace_file(
+            &mut self.tree,
+            file.relative_path.clone(),
+            tag_based_rel_path.clone(),
+        ) {
+            println!("Failed to forget file: {}", file.relative_path.display());
+        }
+
+        self.selected = Some(tag_based_rel_path);
     }
 }
 
-fn find_file(tree: &Vec<FsEntry>, path: PathBuf) -> Option<&MusicFile> {
+// fn print_tree(tree: &Vec<FsEntry>) {
+//     for entry in tree {
+//         match entry {
+//             FsEntry::FsFile(f) => {
+//                 println!("File: {}", f.relative_path.display());
+//             }
+//             FsEntry::FsDirectory(d) => {
+//                 println!("Directory: {}", d.relative_path.display());
+//                 print_tree(&d.children);
+//             }
+//             FsEntry::FsMusicFile(mf) => {
+//                 println!("MusicFile: {}", mf.relative_path.display());
+//             }
+//         }
+//     }
+// }
+
+fn find_file(tree: &Vec<FsEntry>, path: PathBuf) -> Option<MusicFile> {
     for entry in tree {
         if let FsEntry::FsMusicFile(mf) = entry {
             if mf.relative_path == path {
-                return Some(&mf);
+                return Some(mf.clone());
             }
         }
         if let FsEntry::FsDirectory(d) = entry {
@@ -366,6 +414,31 @@ fn find_file(tree: &Vec<FsEntry>, path: PathBuf) -> Option<&MusicFile> {
         }
     }
     return None;
+}
+
+fn replace_file(tree: &mut Vec<FsEntry>, old_path: PathBuf, new_path: PathBuf) -> bool {
+    for (i, entry) in tree.iter_mut().enumerate() {
+        if let FsEntry::FsDirectory(d) = entry {
+            if replace_file(&mut d.children, old_path.clone(), new_path.clone()) {
+                return true;
+            }
+        }
+
+        if let FsEntry::FsMusicFile(mf) = entry {
+            if mf.relative_path == old_path {
+                let new_mf = MusicFile::new(&mf.base_path, &new_path);
+                if new_mf.is_none() {
+                    panic!("Failed to create new music file: {}", new_path.display());
+                }
+                tree[i] = FsEntry::FsMusicFile(new_mf.unwrap());
+                return true;
+            }
+        } else {
+            continue;
+        }
+    }
+
+    return false;
 }
 
 fn find_problems(mf: &MusicFile) -> Vec<Problem> {

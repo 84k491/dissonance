@@ -115,6 +115,9 @@ pub mod music_file {
         pub fn tags(&self) -> Tags {
             let mut full_path = self.base_path.clone();
             full_path.push(&self.relative_path);
+            if full_path.exists() == false {
+                panic!("Tags: File does not exist: {}", full_path.display());
+            }
             let tag = Tag::new().read_from_path(&full_path).unwrap();
             let mut ret = Tags {
                 title: String::new(),
