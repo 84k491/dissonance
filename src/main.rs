@@ -4,45 +4,21 @@ use iced::{
 };
 use iced::{Background, Color};
 
-use crate::music_file::music_file::{Directory, File, MusicFile};
-use pathdiff::diff_paths;
+use crate::file_tree::file_tree::{FileTree, FsEntry, load_dir};
+use crate::music_file::music_file::MusicFile;
 use std::{
-    collections::HashSet, fmt::{self, Display}, fs, path::{Path, PathBuf}
+    collections::HashSet,
+    fmt::{self, Display},
+    fs,
+    path::PathBuf,
 };
 
+mod file_tree;
 mod music_file;
 mod tags;
 
 fn main() -> iced::Result {
     DissonanceApp::run(Settings::default())
-}
-
-#[derive(Debug, Clone)]
-enum FsEntry {
-    FsFile(File),
-    FsMusicFile(MusicFile),
-    FsDirectory(Directory),
-}
-
-impl FsEntry {
-    fn from(root_path: &PathBuf, relative_path: &PathBuf) -> FsEntry {
-        let abs_path = root_path.clone().join(&relative_path);
-
-        if abs_path.is_dir() {
-            let children = load_dir(root_path.clone(), relative_path.clone());
-            let d = Directory::new(&root_path, relative_path, children);
-            return FsEntry::FsDirectory(d);
-        } else {
-            let f = File::new(&root_path, &relative_path);
-            let mf = MusicFile::from(f.clone());
-            if let None = mf {
-                return FsEntry::FsFile(f);
-            }
-            let mf = mf.unwrap();
-
-            return FsEntry::FsMusicFile(mf);
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +32,7 @@ enum Message {
 }
 
 struct DissonanceApp {
-    tree: Vec<FsEntry>,
+    file_tree: FileTree,
     selected: Option<PathBuf>,
     source: Option<PathBuf>,
     destination: Option<PathBuf>,
@@ -68,13 +44,6 @@ enum Problem {
     MismatchedTags,
     MismatchedPath,
     // MissingAlbumArt,
-}
-
-fn action_to_message(action: Action, rel_path: PathBuf) -> Message {
-    match action {
-        Action::FixTags => Message::FixTags(rel_path),
-        Action::MoveFile => Message::MoveFile(rel_path),
-    }
 }
 
 impl Display for Problem {
@@ -89,6 +58,15 @@ enum Action {
     MoveFile,
     // GetAlbumArt,
     // ApplyCustomTags,
+}
+
+impl Action {
+    fn to_message(&self, rel_path: PathBuf) -> Message {
+        match self {
+            Action::FixTags => Message::FixTags(rel_path),
+            Action::MoveFile => Message::MoveFile(rel_path),
+        }
+    }
 }
 
 impl Display for Action {
@@ -109,7 +87,7 @@ impl Application for DissonanceApp {
 
         (
             Self {
-                tree: Vec::new(),
+                file_tree: FileTree::empty(),
                 selected: None,
                 source: Some(s),
                 destination: Some(d),
@@ -130,12 +108,12 @@ impl Application for DissonanceApp {
             ),
 
             Message::RootLoaded(nodes) => {
-                self.tree = nodes;
+                self.file_tree = FileTree::from(nodes);
                 Command::none()
             }
 
             Message::ToggleDir(path) => {
-                toggle_dir(&mut self.tree, &path);
+                self.file_tree.toggle_dir(&path);
                 Command::none()
             }
 
@@ -201,7 +179,7 @@ impl DissonanceApp {
     }
 
     fn render_main_panel(&self) -> iced::widget::Row<'_, Message> {
-        let tree_view = scrollable(render_tree(&self.tree, 0))
+        let tree_view = scrollable(render_tree(&self.file_tree.entries, 0))
             .height(Length::Fill)
             .width(Length::Fill);
 
@@ -292,10 +270,8 @@ impl DissonanceApp {
 
         let column = actions.iter().fold(Column::new().spacing(4), |col, a| {
             col.push(
-                button(text(a.to_string()).size(16)).on_press(action_to_message(
-                    (*a).clone(),
-                    self.selected.clone().unwrap(),
-                )),
+                button(text(a.to_string()).size(16))
+                    .on_press(a.to_message(self.selected.clone().unwrap())),
             )
         });
 
@@ -335,32 +311,39 @@ impl DissonanceApp {
             return;
         }
 
-        let mf_ref = find_file(&self.tree, &path);
-        if mf_ref.is_none() {
-            return;
-        }
-        let mf = mf_ref.unwrap();
+        let mf_ref = self.file_tree.find(&path);
+        let mf = match mf_ref {
+            Some(FsEntry::FsMusicFile(mf)) => mf,
+            _ => return,
+        };
 
         let tags = mf.compose_tags_from_path();
         mf.set_tags(&tags);
 
-        if !replace_file(&mut self.tree, path.clone(), mf.relative_path.clone()) {
-            println!("Fix tags: Failed to forget file: {}", path.display());
+        if !self.file_tree.remove_entry(&path) {
+            println!("Failed to forget file: {}", path.display());
         }
+        self.file_tree.add_entry(&path);
     }
 
     fn move_file(&mut self, path: PathBuf) {
-        let mf_ref = find_file(&self.tree, &path);
-        if mf_ref.is_none() {
-            return;
-        }
-        let file = mf_ref.unwrap();
+        let (rel_path, tag_based_rel_path) = {
+            let mf_opt = self.file_tree.find(&path);
+            let file = match mf_opt {
+                Some(FsEntry::FsMusicFile(mf)) => mf,
+                _ => return,
+            };
+
+            (
+                file.relative_path.clone(),
+                file.compose_path_from_tags(&file.tags()),
+            )
+        };
 
         let mut source_full_path = self.source.clone().unwrap().to_path_buf();
-        source_full_path.push(&file.relative_path);
+        source_full_path.push(&rel_path);
 
         let mut target_full_path = self.source.clone().unwrap().to_path_buf();
-        let tag_based_rel_path = file.compose_path_from_tags(&file.tags());
         target_full_path.push(tag_based_rel_path.clone());
 
         let _ = fs::create_dir_all(target_full_path.parent().unwrap());
@@ -370,12 +353,9 @@ impl DissonanceApp {
             return;
         }
 
-        if !replace_file(
-            &mut self.tree,
-            file.relative_path.clone(),
-            tag_based_rel_path.clone(),
-        ) {
-            println!("Failed to forget file: {}", file.relative_path.display());
+        self.file_tree.add_entry(&tag_based_rel_path);
+        if !self.file_tree.remove_entry(&rel_path) {
+            println!("Failed to forget file: {}", rel_path.to_string_lossy());
         }
 
         self.selected = Some(tag_based_rel_path);
@@ -399,48 +379,6 @@ impl DissonanceApp {
 //     }
 // }
 
-fn find_file(tree: &Vec<FsEntry>, path: &PathBuf) -> Option<MusicFile> {
-    for entry in tree {
-        if let FsEntry::FsMusicFile(mf) = entry {
-            if mf.relative_path == *path.clone() {
-                return Some(mf.clone());
-            }
-        }
-        if let FsEntry::FsDirectory(d) = entry {
-            if let Some(mf) = find_file(&d.children, path) {
-                return Some(mf);
-            }
-        }
-    }
-    return None;
-}
-
-fn replace_file(tree: &mut Vec<FsEntry>, old_path: PathBuf, new_path: PathBuf) -> bool {
-    for (i, entry) in tree.iter_mut().enumerate() {
-        if let FsEntry::FsDirectory(d) = entry {
-            if replace_file(&mut d.children, old_path.clone(), new_path.clone()) {
-                return true;
-            }
-        }
-
-        if let FsEntry::FsMusicFile(mf) = entry {
-            if mf.relative_path == old_path {
-                let new_mf = MusicFile::new(&mf.base_path, &new_path);
-                if new_mf.is_none() {
-                    panic!("Failed to create new music file: {}", new_path.display());
-                }
-                let mf = new_mf.unwrap();
-                tree[i] = FsEntry::FsMusicFile(mf);
-                return true;
-            }
-        } else {
-            continue;
-        }
-    }
-
-    return false;
-}
-
 async fn get_source() -> PathBuf {
     let s = PathBuf::from("/home/bakar/tmp/mu/source");
     s
@@ -448,49 +386,6 @@ async fn get_source() -> PathBuf {
 
 async fn load_root_dir(root_path: PathBuf, target_rel_path: PathBuf) -> Vec<FsEntry> {
     return load_dir(root_path, target_rel_path);
-}
-
-fn load_dir(root_path: PathBuf, target_rel_path: PathBuf) -> Vec<FsEntry> {
-    let mut nodes = Vec::<FsEntry>::new();
-    let target_abs_path = root_path.join(&target_rel_path);
-
-    let read_dir = std::fs::read_dir(&target_abs_path);
-    if let Err(_) = read_dir {
-        return vec![];
-    }
-
-    let read_dir = read_dir.unwrap();
-
-    for entry in read_dir {
-        if let Err(_) = entry {
-            continue;
-        }
-
-        let absolute_path = entry.unwrap().path();
-        let relative_path = diff_paths(&absolute_path, &root_path)
-            .expect("Can't create relative path")
-            .to_path_buf();
-
-        let e = FsEntry::from(&root_path, &relative_path);
-        nodes.push(e);
-    }
-
-    nodes
-}
-
-fn toggle_dir(nodes: &mut Vec<FsEntry>, target: &Path) {
-    for node in nodes {
-        match node {
-            FsEntry::FsDirectory(d) => {
-                if d.relative_path == target {
-                    d.expanded = !d.expanded;
-                } else {
-                    toggle_dir(&mut d.children, target);
-                }
-            }
-            _ => continue,
-        };
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -661,6 +556,7 @@ fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, 
     col
 }
 
+// TODO don't let fix tags if file doesn't have both parents
 fn get_suitable_actions(problems: Vec<Problem>) -> HashSet<Action> {
     let mut actions = HashSet::<Action>::new();
     for p in problems {
