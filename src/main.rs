@@ -37,15 +37,12 @@ impl FsEntry {
         } else {
             let f = File::new(&root_path, &relative_path);
             let mf = MusicFile::from(f.clone());
+            if let None = mf {
+                return FsEntry::FsFile(f);
+            }
+            let mf = mf.unwrap();
 
-            match mf {
-                None => {
-                    return FsEntry::FsFile(f);
-                }
-                Some(mf) => {
-                    return FsEntry::FsMusicFile(mf);
-                }
-            };
+            return FsEntry::FsMusicFile(mf);
         }
     }
 }
@@ -260,7 +257,7 @@ impl DissonanceApp {
             FsEntry::FsDirectory(_) => {
                 vec![]
             }
-            FsEntry::FsMusicFile(mf) => find_problems(&mf),
+            FsEntry::FsMusicFile(mf) => mf.find_problems(),
         };
 
         if problems.is_empty() {
@@ -290,7 +287,7 @@ impl DissonanceApp {
             FsEntry::FsDirectory(_) => {
                 vec![]
             }
-            FsEntry::FsMusicFile(mf) => find_problems(&mf),
+            FsEntry::FsMusicFile(mf) => mf.find_problems(),
         };
 
         let actions = get_suitable_actions(problems);
@@ -335,12 +332,12 @@ impl DissonanceApp {
         .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
     }
 
-    fn fix_tags(&self, path: PathBuf) {
+    fn fix_tags(&mut self, path: PathBuf) {
         if self.source.is_none() || self.selected.is_none() {
             return;
         }
 
-        let mf_ref = find_file(&self.tree, path);
+        let mf_ref = find_file(&self.tree, &path);
         if mf_ref.is_none() {
             return;
         }
@@ -348,10 +345,14 @@ impl DissonanceApp {
 
         let tags = mf.compose_tags_from_path();
         mf.set_tags(&tags);
+
+        if !replace_file(&mut self.tree, path.clone(), mf.relative_path.clone()) {
+            println!("Fix tags: Failed to forget file: {}", path.display());
+        }
     }
 
     fn move_file(&mut self, path: PathBuf) {
-        let mf_ref = find_file(&self.tree, path);
+        let mf_ref = find_file(&self.tree, &path);
         if mf_ref.is_none() {
             return;
         }
@@ -400,15 +401,15 @@ impl DissonanceApp {
 //     }
 // }
 
-fn find_file(tree: &Vec<FsEntry>, path: PathBuf) -> Option<MusicFile> {
+fn find_file(tree: &Vec<FsEntry>, path: &PathBuf) -> Option<MusicFile> {
     for entry in tree {
         if let FsEntry::FsMusicFile(mf) = entry {
-            if mf.relative_path == path {
+            if mf.relative_path == *path.clone() {
                 return Some(mf.clone());
             }
         }
         if let FsEntry::FsDirectory(d) = entry {
-            if let Some(mf) = find_file(&d.children, path.clone()) {
+            if let Some(mf) = find_file(&d.children, path) {
                 return Some(mf);
             }
         }
@@ -430,7 +431,8 @@ fn replace_file(tree: &mut Vec<FsEntry>, old_path: PathBuf, new_path: PathBuf) -
                 if new_mf.is_none() {
                     panic!("Failed to create new music file: {}", new_path.display());
                 }
-                tree[i] = FsEntry::FsMusicFile(new_mf.unwrap());
+                let mf = new_mf.unwrap();
+                tree[i] = FsEntry::FsMusicFile(mf);
                 return true;
             }
         } else {
@@ -439,30 +441,6 @@ fn replace_file(tree: &mut Vec<FsEntry>, old_path: PathBuf, new_path: PathBuf) -
     }
 
     return false;
-}
-
-fn find_problems(mf: &MusicFile) -> Vec<Problem> {
-    let mut ret = Vec::<Problem>::new();
-
-    if !mf.tag_available() {
-        ret.push(Problem::MissingTags);
-    }
-
-    let installed_tags = mf.tags();
-    let mut path_tags = mf.compose_tags_from_path();
-    path_tags.track_number = installed_tags.track_number.clone();
-
-    if path_tags != installed_tags {
-        ret.push(Problem::MismatchedTags);
-    }
-
-    let tags_path = mf.compose_path_from_tags(&installed_tags);
-
-    if mf.relative_path != tags_path {
-        ret.push(Problem::MismatchedPath);
-    }
-
-    return ret;
 }
 
 async fn get_source() -> PathBuf {
@@ -550,6 +528,29 @@ impl container::StyleSheet for PaneStyle {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ButtonStyle {
+    Correct,
+    Problematic,
+}
+
+impl button::StyleSheet for ButtonStyle {
+    type Style = Theme;
+
+    fn active(&self, _style: &Theme) -> button::Appearance {
+        match self {
+            ButtonStyle::Correct => button::Appearance {
+                background: Some(Background::Color(Color::from_rgb(0.80, 0.80, 0.80))),
+                ..Default::default()
+            },
+            ButtonStyle::Problematic => button::Appearance {
+                background: Some(Background::Color(Color::from_rgb(0.80, 0.80, 0.60))),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 struct ActionPanelStyle {}
 impl container::StyleSheet for ActionPanelStyle {
     type Style = Theme;
@@ -626,7 +627,14 @@ fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, 
                 button(text(label)).on_press(Message::SelectFile(f.relative_path.clone()))
             }
             FsEntry::FsMusicFile(f) => {
-                button(text(label)).on_press(Message::SelectFile(f.relative_path.clone()))
+                let style_enum = if f.has_problems() {
+                    ButtonStyle::Problematic
+                } else {
+                    ButtonStyle::Correct
+                };
+                button(text(label))
+                    .on_press(Message::SelectFile(f.relative_path.clone()))
+                    .style(iced::theme::Button::Custom(Box::new(style_enum)))
             }
             FsEntry::FsDirectory(d) => {
                 button(text(label)).on_press(Message::ToggleDir(d.relative_path.clone()))

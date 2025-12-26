@@ -1,6 +1,6 @@
 pub mod music_file {
-    use crate::FsEntry;
     use crate::tags::tags::Tags;
+    use crate::{FsEntry, Problem};
     use audiotags::Tag;
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -37,6 +37,7 @@ pub mod music_file {
     pub struct MusicFile {
         pub base_path: PathBuf,
         pub relative_path: PathBuf,
+        has_problems: bool,
     }
     impl MusicFile {
         pub fn from(simple_file: File) -> Option<MusicFile> {
@@ -44,21 +45,35 @@ pub mod music_file {
                 return None;
             }
 
-            let ret = MusicFile {
+            let mut ret = MusicFile {
                 base_path: simple_file.base_path.clone(),
                 relative_path: simple_file.relative_path.clone(),
+                has_problems: true,
             };
+            let problems = ret.find_problems();
+            ret.has_problems = !problems.is_empty();
             Some(ret)
         }
+
         pub fn new(base: &PathBuf, relative: &PathBuf) -> Option<MusicFile> {
-            let ret = MusicFile {
+            let mut ret = MusicFile {
                 base_path: base.clone(),
                 relative_path: relative.clone(),
+                has_problems: true,
             };
+
             if ret.tag_available() {
+                let problems = ret.find_problems();
+                ret.has_problems = !problems.is_empty();
+
                 return Some(ret);
             }
+
             return None;
+        }
+
+        pub fn has_problems(&self) -> bool {
+            return self.has_problems;
         }
 
         pub fn tag_available(&self) -> bool {
@@ -152,20 +167,6 @@ pub mod music_file {
             return ret;
         }
 
-        pub fn paths_match(&self) -> bool {
-            let real_path = self.relative_path.clone();
-            let real_path_str = real_path.to_str();
-            if real_path_str.is_none() {
-                return false;
-            }
-            let path_from_tags = self.compose_path_from_tags(&self.tags());
-            let path_from_tags_str = path_from_tags.to_str();
-            if path_from_tags_str.is_none() {
-                return false;
-            }
-            return Some(real_path_str) == Some(path_from_tags_str);
-        }
-
         pub fn set_tags(&self, tags: &Tags) {
             let mut full_path = self.base_path.clone();
             full_path.push(&self.relative_path);
@@ -187,16 +188,40 @@ pub mod music_file {
                 .expect(format!("ERR Fail to save to {:?}", full_path).as_str());
         }
 
-        pub fn remove_tags(&self) {
-            let mut full_path = self.base_path.clone();
-            full_path.push(&self.relative_path);
-            let mut tag = Tag::new().read_from_path(full_path).unwrap();
+        // pub fn remove_tags(&self) {
+        //     let mut full_path = self.base_path.clone();
+        //     full_path.push(&self.relative_path);
+        //     let mut tag = Tag::new().read_from_path(full_path).unwrap();
+        //
+        //     tag.remove_title();
+        //     tag.remove_album_title();
+        //     tag.remove_artist();
+        //     tag.remove_album_artist();
+        //     tag.remove_track_number();
+        // }
 
-            tag.remove_title();
-            tag.remove_album_title();
-            tag.remove_artist();
-            tag.remove_album_artist();
-            tag.remove_track_number();
+        pub fn find_problems(&self) -> Vec<Problem> {
+            let mut ret = Vec::<Problem>::new();
+
+            if !self.tag_available() {
+                ret.push(Problem::MissingTags);
+            }
+
+            let installed_tags = self.tags();
+            let mut path_tags = self.compose_tags_from_path();
+            path_tags.track_number = installed_tags.track_number.clone();
+
+            if path_tags != installed_tags {
+                ret.push(Problem::MismatchedTags);
+            }
+
+            let tags_path = self.compose_path_from_tags(&installed_tags);
+
+            if self.relative_path != tags_path {
+                ret.push(Problem::MismatchedPath);
+            }
+
+            return ret;
         }
     }
 
