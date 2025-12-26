@@ -637,7 +637,14 @@ fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, 
                     .style(iced::theme::Button::Custom(Box::new(style_enum)))
             }
             FsEntry::FsDirectory(d) => {
-                button(text(label)).on_press(Message::ToggleDir(d.relative_path.clone()))
+                let style_enum = if d.has_problems() {
+                    ButtonStyle::Problematic
+                } else {
+                    ButtonStyle::Correct
+                };
+                button(text(label))
+                    .on_press(Message::ToggleDir(d.relative_path.clone()))
+                    .style(iced::theme::Button::Custom(Box::new(style_enum)))
             }
         };
 

@@ -242,5 +242,26 @@ pub mod music_file {
             };
             ret
         }
+        pub fn has_problems(&self) -> bool {
+            for child in &self.children {
+                match child {
+                    FsEntry::FsFile(f) => {
+                        return true;
+                    }
+                    FsEntry::FsDirectory(d) => {
+                        if d.has_problems() {
+                            return true;
+                        }
+                    }
+                    FsEntry::FsMusicFile(mf) => {
+                        if mf.has_problems() {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
     }
 }
