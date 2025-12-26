@@ -245,7 +245,7 @@ pub mod music_file {
         pub fn has_problems(&self) -> bool {
             for child in &self.children {
                 match child {
-                    FsEntry::FsFile(f) => {
+                    FsEntry::FsFile(_) => {
                         return true;
                     }
                     FsEntry::FsDirectory(d) => {

@@ -7,9 +7,7 @@ use iced::{Background, Color};
 use crate::music_file::music_file::{Directory, File, MusicFile};
 use pathdiff::diff_paths;
 use std::{
-    fmt::{self, Display},
-    fs,
-    path::{Path, PathBuf},
+    collections::HashSet, fmt::{self, Display}, fs, path::{Path, PathBuf}
 };
 
 mod music_file;
@@ -85,7 +83,7 @@ impl Display for Problem {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 enum Action {
     FixTags,
     MoveFile,
@@ -214,7 +212,7 @@ impl DissonanceApp {
             container(tree_view)
                 .padding(10)
                 .height(Length::Fill)
-                .width(Length::FillPortion(1))
+                .width(Length::FillPortion(2))
                 .style(iced::theme::Container::Custom(Box::new(TreePanelStyle {}))),
             container(info_panel)
                 .padding(10)
@@ -663,16 +661,16 @@ fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, 
     col
 }
 
-fn get_suitable_actions(problems: Vec<Problem>) -> Vec<Action> {
-    let mut actions = Vec::new();
+fn get_suitable_actions(problems: Vec<Problem>) -> HashSet<Action> {
+    let mut actions = HashSet::<Action>::new();
     for p in problems {
         match p {
             Problem::MissingTags => {
-                actions.push(Action::FixTags);
+                actions.insert(Action::FixTags);
             }
             Problem::MismatchedTags | Problem::MismatchedPath => {
-                actions.push(Action::FixTags);
-                actions.push(Action::MoveFile);
+                actions.insert(Action::FixTags);
+                actions.insert(Action::MoveFile);
             }
         }
     }
