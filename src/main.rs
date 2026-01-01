@@ -3,13 +3,15 @@ use iced::{
     widget::{Column, button, column, container, row, scrollable, text},
 };
 use iced::{Background, Color};
+use serde::{Deserialize, Serialize};
 
 use crate::file_tree::file_tree::{FileTree, FsEntry, load_dir};
 use crate::music_file::music_file::MusicFile;
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fmt::{self, Display},
-    fs,
+    fs::{self, File},
+    io::BufWriter,
     path::PathBuf,
 };
 
@@ -35,8 +37,11 @@ enum Message {
 struct DissonanceApp {
     file_tree: FileTree,
     selected: Option<PathBuf>,
+
     source: Option<PathBuf>,
     destination: Option<PathBuf>,
+
+    sync_info: BTreeMap<PathBuf, SyncedEntry>,
 }
 
 #[derive(Debug)]
@@ -62,6 +67,20 @@ enum Action {
     // ApplyCustomTags,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum SyncIntention {
+    KeepSync,
+    DropSync,
+    Unspecified,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SyncedEntry {
+    rel_path: PathBuf,
+    intention: SyncIntention,
+    synced: bool,
+}
+
 impl Action {
     fn to_message(&self, rel_path: PathBuf) -> Message {
         match self {
@@ -78,6 +97,12 @@ impl Display for Action {
     }
 }
 
+impl Drop for DissonanceApp {
+    fn drop(&mut self) {
+        Self::save_index(&self.sync_info);
+    }
+}
+
 impl Application for DissonanceApp {
     type Executor = executor::Default;
     type Message = Message;
@@ -88,12 +113,14 @@ impl Application for DissonanceApp {
         let s = PathBuf::from("/home/bakar/tmp/mu/source");
         let d = PathBuf::from("/home/bakar/tmp/mu/dest");
 
+        let index = DissonanceApp::load_index();
         (
             Self {
                 file_tree: FileTree::empty(),
                 selected: None,
                 source: Some(s),
                 destination: Some(d),
+                sync_info: index,
             },
             Command::perform(get_source(), Message::SourceSet),
         )
@@ -112,6 +139,7 @@ impl Application for DissonanceApp {
 
             Message::RootLoaded(nodes) => {
                 self.file_tree = FileTree::from(nodes);
+                self.update_index_local();
                 Command::none()
             }
 
@@ -159,7 +187,63 @@ impl Application for DissonanceApp {
         .into()
     }
 }
+
 impl DissonanceApp {
+    fn load_index() -> BTreeMap<PathBuf, SyncedEntry> {
+        let file = match File::open("index.json") {
+            Err(_) => return BTreeMap::new(),
+            Ok(f) => f,
+        };
+
+        let map: BTreeMap<PathBuf, SyncedEntry> = serde_json::from_reader(file).unwrap();
+        map
+    }
+
+    fn save_index(index: &BTreeMap<PathBuf, SyncedEntry>) {
+        let file = match File::create("index.json") {
+            Err(_) => {
+                println!("Failed to create index.json");
+                return;
+            }
+            Ok(f) => BufWriter::new(f),
+        };
+
+        match serde_json::to_writer_pretty(file, &index) {
+            Err(_) => println!("Failed to write to index.json"),
+            Ok(_) => {}
+        }
+    }
+
+    fn update_index_local(&mut self) {
+        let local_entries = self.file_tree.flat();
+
+        // remove from index those entries that are not in local files
+        self.sync_info = self
+            .sync_info
+            .iter()
+            .filter(|(k, _)| local_entries.contains(*k))
+            .map(|(k, v)| (k.clone(), (*v).clone()))
+            .collect();
+
+        // add to index all those local files that are not in index
+        let to_add_to_index: BTreeMap<PathBuf, SyncedEntry> = local_entries
+            .iter()
+            .filter(|k| !self.sync_info.contains_key(*k))
+            .map(|k| {
+                (
+                    k.clone(),
+                    SyncedEntry {
+                        rel_path: k.clone(),
+                        intention: SyncIntention::Unspecified,
+                        synced: false,
+                    },
+                )
+            })
+            .collect();
+
+        self.sync_info.extend(to_add_to_index);
+    }
+
     fn render_top_panel(&self) -> iced::widget::Row<'static, Message> {
         let source_str: Option<String> = self
             .source
@@ -576,6 +660,7 @@ fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, 
 fn get_suitable_actions(entry: &FsEntry) -> HashSet<Action> {
     let problems = match entry {
         FsEntry::FsFile(_) => {
+            // TODO add "remove" action
             vec![]
         }
         FsEntry::FsDirectory(_) => {

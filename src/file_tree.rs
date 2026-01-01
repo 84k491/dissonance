@@ -2,7 +2,10 @@ pub mod file_tree {
 
     use crate::music_file::music_file::{Directory, File, MusicFile};
     use pathdiff::diff_paths;
-    use std::path::{Path, PathBuf};
+    use std::{
+        collections::HashSet,
+        path::{Path, PathBuf},
+    };
 
     #[derive(Debug, Clone)]
     pub enum FsEntry {
@@ -41,6 +44,29 @@ pub mod file_tree {
             FileTree {
                 entries: Vec::<FsEntry>::new(),
             }
+        }
+
+        fn flat_entries(entries: &Vec<FsEntry>) -> HashSet<PathBuf> {
+            let mut res = HashSet::<PathBuf>::new();
+
+            for entry in entries.iter() {
+                match entry {
+                    FsEntry::FsDirectory(d) => {
+                        let d_res = Self::flat_entries(&d.children);
+                        res.extend(d_res);
+                    }
+                    FsEntry::FsFile(_) => { /*don't index those files*/ }
+                    FsEntry::FsMusicFile(mf) => {
+                        res.insert(mf.relative_path.clone());
+                    }
+                }
+            }
+
+            return res;
+        }
+
+        pub fn flat(&self) -> HashSet<PathBuf> {
+            Self::flat_entries(&self.entries)
         }
 
         pub fn from(entries: Vec<FsEntry>) -> FileTree {
