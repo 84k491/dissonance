@@ -139,7 +139,16 @@ impl Application for DissonanceApp {
 
             Message::RootLoaded(nodes) => {
                 self.file_tree = FileTree::from(nodes);
-                self.update_index_local();
+                self.update_index_source();
+                println!(
+                    "Index updated with source files: {} files in total",
+                    self.sync_info.len()
+                );
+                self.update_index_destination();
+                println!(
+                    "Index updated with destination files: {} files in total",
+                    self.sync_info.len()
+                );
                 Command::none()
             }
 
@@ -195,7 +204,12 @@ impl DissonanceApp {
             Ok(f) => f,
         };
 
-        let map: BTreeMap<PathBuf, SyncedEntry> = serde_json::from_reader(file).unwrap();
+        let map: BTreeMap<PathBuf, SyncedEntry> = match serde_json::from_reader(file) {
+            Err(_) => return BTreeMap::new(),
+            Ok(m) => m,
+        };
+
+        println!("Index loaded from json: {} files", map.len());
         map
     }
 
@@ -212,9 +226,11 @@ impl DissonanceApp {
             Err(_) => println!("Failed to write to index.json"),
             Ok(_) => {}
         }
+
+        println!("Index saved to json: {} files", index.len());
     }
 
-    fn update_index_local(&mut self) {
+    fn update_index_source(&mut self) {
         let local_entries = self.file_tree.flat();
 
         // remove from index those entries that are not in local files
@@ -242,6 +258,50 @@ impl DissonanceApp {
             .collect();
 
         self.sync_info.extend(to_add_to_index);
+    }
+
+    fn update_index_destination(&mut self) {
+        if self.destination.is_none() {
+            return;
+        }
+
+        let dest_entries = load_dir(self.destination.clone().unwrap(), PathBuf::new());
+        let dest_tree = FileTree::from(dest_entries);
+        let dest_entries = dest_tree.flat();
+
+        // add to index (with {drop, unsync}) those entries that are in dest, but not in index // they will be removed from index on next local scan
+        let to_add_to_index: BTreeMap<PathBuf, SyncedEntry> = dest_entries
+            .iter()
+            .filter(|k| !self.sync_info.contains_key(*k))
+            .map(|k| {
+                (
+                    k.clone(),
+                    SyncedEntry {
+                        rel_path: k.clone(),
+                        intention: SyncIntention::DropSync,
+                        synced: false,
+                    },
+                )
+            })
+            .collect();
+        self.sync_info.extend(to_add_to_index);
+
+        // update existing entries
+        for (rel_path, e) in self.sync_info.iter_mut() {
+            let is_in_dest = dest_entries.contains(rel_path);
+
+            match e.intention {
+                SyncIntention::KeepSync => {
+                    e.synced = is_in_dest;
+                }
+                SyncIntention::DropSync => {
+                    e.synced = !is_in_dest;
+                }
+                SyncIntention::Unspecified => {
+                    e.synced = false;
+                }
+            };
+        }
     }
 
     fn render_top_panel(&self) -> iced::widget::Row<'static, Message> {
