@@ -32,6 +32,8 @@ enum Message {
     FixTags(PathBuf),
     RemoveTags(PathBuf),
     MoveFile(PathBuf),
+    KeepSync(PathBuf),
+    DropSync(PathBuf),
 }
 
 struct DissonanceApp {
@@ -63,6 +65,8 @@ enum Action {
     RemoveTags,
     FixTags,
     MoveFile,
+    KeepSync,
+    DropSync,
     // GetAlbumArt,
     // ApplyCustomTags,
 }
@@ -87,6 +91,8 @@ impl Action {
             Action::FixTags => Message::FixTags(rel_path),
             Action::MoveFile => Message::MoveFile(rel_path),
             Action::RemoveTags => Message::RemoveTags(rel_path),
+            Action::KeepSync => Message::KeepSync(rel_path),
+            Action::DropSync => Message::DropSync(rel_path),
         }
     }
 }
@@ -144,7 +150,7 @@ impl Application for DissonanceApp {
                     "Index updated with source files: {} files in total",
                     self.sync_info.len()
                 );
-                self.update_index_destination();
+                self.update_index_destination(); // TODO async
                 println!(
                     "Index updated with destination files: {} files in total",
                     self.sync_info.len()
@@ -171,6 +177,14 @@ impl Application for DissonanceApp {
             }
             Message::MoveFile(rel_path) => {
                 self.move_file(rel_path);
+                Command::none()
+            }
+            Message::KeepSync(rel_path) => {
+                self.keep_sync(rel_path);
+                Command::none()
+            }
+            Message::DropSync(rel_path) => {
+                self.drop_sync(rel_path);
                 Command::none()
             }
         }
@@ -211,6 +225,18 @@ impl DissonanceApp {
 
         println!("Index loaded from json: {} files", map.len());
         map
+    }
+
+    fn keep_sync(&mut self, rel_path: PathBuf) {
+        self.sync_info
+            .entry(rel_path) // creates new
+            .and_modify(|e| e.intention = SyncIntention::KeepSync);
+    }
+
+    fn drop_sync(&mut self, rel_path: PathBuf) {
+        self.sync_info
+            .entry(rel_path) // creates new
+            .and_modify(|e| e.intention = SyncIntention::DropSync);
     }
 
     fn save_index(index: &BTreeMap<PathBuf, SyncedEntry>) {
@@ -398,6 +424,61 @@ impl DissonanceApp {
         return column;
     }
 
+    fn get_suitable_actions(&self, entry: &FsEntry) -> HashSet<Action> {
+        let mf = match entry {
+            FsEntry::FsMusicFile(mf) => mf,
+            _ => return HashSet::new(),
+        };
+        let problems = mf.find_problems();
+
+        // TODO don't let fix tags if file doesn't have both parents
+
+        let mut actions = HashSet::<Action>::new();
+
+        if !problems.is_empty() {
+            for p in problems {
+                match p {
+                    Problem::MissingTags => {
+                        actions.insert(Action::FixTags);
+                    }
+                    Problem::MismatchedTags | Problem::MismatchedPath => {
+                        actions.insert(Action::FixTags);
+                        actions.insert(Action::MoveFile);
+                        actions.insert(Action::RemoveTags);
+                    }
+                }
+            }
+        } else {
+            actions.insert(Action::RemoveTags);
+        }
+
+        let intention = match self.sync_info.get(&mf.relative_path) {
+            None => {
+                println!(
+                    "ERROR Missing sync info for: {}",
+                    mf.relative_path.display()
+                );
+                SyncIntention::Unspecified
+            }
+            Some(i) => i.intention.clone(),
+        };
+
+        match intention {
+            SyncIntention::KeepSync => {
+                actions.insert(Action::DropSync);
+            }
+            SyncIntention::DropSync => {
+                actions.insert(Action::KeepSync);
+            }
+            SyncIntention::Unspecified => {
+                actions.insert(Action::KeepSync);
+                actions.insert(Action::DropSync);
+            }
+        }
+
+        actions
+    }
+
     fn render_actions_panel(&self) -> iced::widget::Column<'static, Message> {
         if self.source.is_none() || self.selected.is_none() {
             return column![];
@@ -407,7 +488,7 @@ impl DissonanceApp {
             self.selected.as_ref().unwrap(),
         );
 
-        let actions = get_suitable_actions(&entry);
+        let actions = self.get_suitable_actions(&entry);
 
         let column = actions.iter().fold(Column::new().spacing(4), |col, a| {
             col.push(
@@ -715,40 +796,4 @@ fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, 
     }
 
     col
-}
-
-fn get_suitable_actions(entry: &FsEntry) -> HashSet<Action> {
-    let problems = match entry {
-        FsEntry::FsFile(_) => {
-            // TODO add "remove" action
-            vec![]
-        }
-        FsEntry::FsDirectory(_) => {
-            vec![]
-        }
-        FsEntry::FsMusicFile(mf) => mf.find_problems(),
-    };
-
-    // TODO don't let fix tags if file doesn't have both parents
-
-    let mut actions = HashSet::<Action>::new();
-
-    if !problems.is_empty() {
-        for p in problems {
-            match p {
-                Problem::MissingTags => {
-                    actions.insert(Action::FixTags);
-                }
-                Problem::MismatchedTags | Problem::MismatchedPath => {
-                    actions.insert(Action::FixTags);
-                    actions.insert(Action::MoveFile);
-                    actions.insert(Action::RemoveTags);
-                }
-            }
-        }
-    } else {
-        actions.insert(Action::RemoveTags);
-    }
-
-    actions
 }
