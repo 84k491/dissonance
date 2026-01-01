@@ -356,7 +356,7 @@ impl DissonanceApp {
     }
 
     fn render_main_panel(&self) -> iced::widget::Row<'_, Message> {
-        let tree_view = scrollable(render_tree(&self.file_tree.entries, 0))
+        let tree_view = scrollable(self.render_tree(&self.file_tree.entries, 0))
             .height(Length::Fill)
             .width(Length::Fill);
 
@@ -602,6 +602,79 @@ impl DissonanceApp {
 
         self.selected = Some(tag_based_rel_path);
     }
+
+    fn render_tree(
+        &self,
+        nodes: &Vec<FsEntry>,
+        indent: usize,
+    ) -> iced::widget::Column<'_, Message> {
+        let mut col = column!().spacing(4);
+
+        for node in nodes {
+            let rel_path = match node {
+                FsEntry::FsFile(f) => &f.relative_path,
+                FsEntry::FsMusicFile(mf) => &mf.relative_path,
+                FsEntry::FsDirectory(d) => &d.relative_path,
+            };
+            let name = rel_path.file_name().unwrap().to_string_lossy().to_string();
+
+            let label = match node {
+                FsEntry::FsFile(_) => format!("  {}", name),
+                FsEntry::FsMusicFile(_) => format!("  {}", name),
+                FsEntry::FsDirectory(d) => {
+                    if d.expanded {
+                        format!("V {}", name)
+                    } else {
+                        format!("> {}", name)
+                    }
+                }
+            };
+
+            let button = match node {
+                FsEntry::FsFile(f) => {
+                    button(text(label)).on_press(Message::SelectFile(f.relative_path.clone()))
+                }
+                FsEntry::FsMusicFile(f) => {
+                    let sync_info = self
+                        .sync_info
+                        .get(&f.relative_path)
+                        .expect("Can't get sync info on tree render");
+
+                    let style = ButtonStyle {
+                        synced: sync_info.synced,
+                        has_problem: f.has_problems(),
+                        intention: sync_info.intention.clone(),
+                    };
+                    button(text(label))
+                        .on_press(Message::SelectFile(f.relative_path.clone()))
+                        .style(iced::theme::Button::Custom(Box::new(style)))
+                }
+                FsEntry::FsDirectory(d) => {
+                    let style = ButtonStyle {
+                        synced: true,
+                        has_problem: false,
+                        intention: SyncIntention::KeepSync,
+                    };
+                    button(text(label))
+                        .on_press(Message::ToggleDir(d.relative_path.clone()))
+                        .style(iced::theme::Button::Custom(Box::new(style)))
+                }
+            };
+
+            col = col.push(container(button).padding([0, 0, 0, (indent as u16) * 16]));
+
+            match node {
+                FsEntry::FsDirectory(d) => {
+                    if d.expanded {
+                        col = col.push(self.render_tree(&d.children, indent + 1));
+                    }
+                }
+                _ => {}
+            };
+        }
+
+        col
+    }
 }
 
 // fn print_tree(tree: &Vec<FsEntry>) {
@@ -663,25 +736,40 @@ impl container::StyleSheet for PaneStyle {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum ButtonStyle {
-    Correct,
-    Problematic,
+struct ButtonStyle {
+    synced: bool,
+    has_problem: bool,
+    intention: SyncIntention,
+}
+
+impl ButtonStyle {
+    fn bg_color(&self) -> Color {
+        let coef = if self.synced { 0.5 } else { 1.0 };
+
+        match self.intention {
+            SyncIntention::KeepSync => Color::from_rgb(0.80 * coef, 0.80 * coef, 0.80 * coef),
+            SyncIntention::DropSync => Color::from_rgb(0.30 * coef, 0.30 * coef, 0.30 * coef),
+            SyncIntention::Unspecified => Color::from_rgb(0.20 * coef, 0.80 * coef, 0.80 * coef),
+        }
+    }
+
+    fn text_color(&self) -> Color {
+        if self.has_problem {
+            return Color::from_rgb(0.90, 0.10, 0.10);
+        } else {
+            return Color::BLACK;
+        }
+    }
 }
 
 impl button::StyleSheet for ButtonStyle {
     type Style = Theme;
 
     fn active(&self, _style: &Theme) -> button::Appearance {
-        match self {
-            ButtonStyle::Correct => button::Appearance {
-                background: Some(Background::Color(Color::from_rgb(0.80, 0.80, 0.80))),
-                ..Default::default()
-            },
-            ButtonStyle::Problematic => button::Appearance {
-                background: Some(Background::Color(Color::from_rgb(0.80, 0.80, 0.60))),
-                ..Default::default()
-            },
+        button::Appearance {
+            background: Some(Background::Color(self.bg_color())),
+            text_color: self.text_color(),
+            ..Default::default()
         }
     }
 }
@@ -732,68 +820,4 @@ impl container::StyleSheet for TreePanelStyle {
             ..Default::default()
         }
     }
-}
-
-fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, Message> {
-    let mut col = column!().spacing(4);
-
-    for node in nodes {
-        let rel_path = match node {
-            FsEntry::FsFile(f) => &f.relative_path,
-            FsEntry::FsMusicFile(mf) => &mf.relative_path,
-            FsEntry::FsDirectory(d) => &d.relative_path,
-        };
-        let name = rel_path.file_name().unwrap().to_string_lossy().to_string();
-
-        let label = match node {
-            FsEntry::FsFile(_) => format!("  {}", name),
-            FsEntry::FsMusicFile(_) => format!("  {}", name),
-            FsEntry::FsDirectory(d) => {
-                if d.expanded {
-                    format!("V {}", name)
-                } else {
-                    format!("> {}", name)
-                }
-            }
-        };
-
-        let button = match node {
-            FsEntry::FsFile(f) => {
-                button(text(label)).on_press(Message::SelectFile(f.relative_path.clone()))
-            }
-            FsEntry::FsMusicFile(f) => {
-                let style_enum = if f.has_problems() {
-                    ButtonStyle::Problematic
-                } else {
-                    ButtonStyle::Correct
-                };
-                button(text(label))
-                    .on_press(Message::SelectFile(f.relative_path.clone()))
-                    .style(iced::theme::Button::Custom(Box::new(style_enum)))
-            }
-            FsEntry::FsDirectory(d) => {
-                let style_enum = if d.has_problems() {
-                    ButtonStyle::Problematic
-                } else {
-                    ButtonStyle::Correct
-                };
-                button(text(label))
-                    .on_press(Message::ToggleDir(d.relative_path.clone()))
-                    .style(iced::theme::Button::Custom(Box::new(style_enum)))
-            }
-        };
-
-        col = col.push(container(button).padding([0, 0, 0, (indent as u16) * 16]));
-
-        match node {
-            FsEntry::FsDirectory(d) => {
-                if d.expanded {
-                    col = col.push(render_tree(&d.children, indent + 1));
-                }
-            }
-            _ => {}
-        };
-    }
-
-    col
 }
