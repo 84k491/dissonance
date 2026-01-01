@@ -28,6 +28,7 @@ enum Message {
     ToggleDir(PathBuf),
     SelectFile(PathBuf),
     FixTags(PathBuf),
+    RemoveTags(PathBuf),
     MoveFile(PathBuf),
 }
 
@@ -54,6 +55,7 @@ impl Display for Problem {
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 enum Action {
+    RemoveTags,
     FixTags,
     MoveFile,
     // GetAlbumArt,
@@ -65,6 +67,7 @@ impl Action {
         match self {
             Action::FixTags => Message::FixTags(rel_path),
             Action::MoveFile => Message::MoveFile(rel_path),
+            Action::RemoveTags => Message::RemoveTags(rel_path),
         }
     }
 }
@@ -123,6 +126,10 @@ impl Application for DissonanceApp {
             }
             Message::FixTags(rel_path) => {
                 self.fix_tags(rel_path);
+                Command::none()
+            }
+            Message::RemoveTags(rel_path) => {
+                self.remove_tags(rel_path);
                 Command::none()
             }
             Message::MoveFile(rel_path) => {
@@ -256,17 +263,7 @@ impl DissonanceApp {
             self.selected.as_ref().unwrap(),
         );
 
-        let problems = match entry {
-            FsEntry::FsFile(_) => {
-                vec![]
-            }
-            FsEntry::FsDirectory(_) => {
-                vec![]
-            }
-            FsEntry::FsMusicFile(mf) => mf.find_problems(),
-        };
-
-        let actions = get_suitable_actions(problems);
+        let actions = get_suitable_actions(&entry);
 
         let column = actions.iter().fold(Column::new().spacing(4), |col, a| {
             col.push(
@@ -318,6 +315,26 @@ impl DissonanceApp {
         };
 
         let tags = mf.compose_tags_from_path();
+        mf.set_tags(&tags);
+
+        if !self.file_tree.remove_entry(&path) {
+            println!("Failed to forget file: {}", path.display());
+        }
+        self.file_tree.add_entry(&path);
+    }
+
+    fn remove_tags(&mut self, path: PathBuf) {
+        if self.source.is_none() || self.selected.is_none() {
+            return;
+        }
+
+        let mf_ref = self.file_tree.find(&path);
+        let mf = match mf_ref {
+            Some(FsEntry::FsMusicFile(mf)) => mf,
+            _ => return,
+        };
+
+        let tags = MusicFile::empty_tags();
         mf.set_tags(&tags);
 
         if !self.file_tree.remove_entry(&path) {
@@ -556,19 +573,36 @@ fn render_tree(nodes: &Vec<FsEntry>, indent: usize) -> iced::widget::Column<'_, 
     col
 }
 
-// TODO don't let fix tags if file doesn't have both parents
-fn get_suitable_actions(problems: Vec<Problem>) -> HashSet<Action> {
+fn get_suitable_actions(entry: &FsEntry) -> HashSet<Action> {
+    let problems = match entry {
+        FsEntry::FsFile(_) => {
+            vec![]
+        }
+        FsEntry::FsDirectory(_) => {
+            vec![]
+        }
+        FsEntry::FsMusicFile(mf) => mf.find_problems(),
+    };
+
+    // TODO don't let fix tags if file doesn't have both parents
+
     let mut actions = HashSet::<Action>::new();
-    for p in problems {
-        match p {
-            Problem::MissingTags => {
-                actions.insert(Action::FixTags);
-            }
-            Problem::MismatchedTags | Problem::MismatchedPath => {
-                actions.insert(Action::FixTags);
-                actions.insert(Action::MoveFile);
+
+    if !problems.is_empty() {
+        for p in problems {
+            match p {
+                Problem::MissingTags => {
+                    actions.insert(Action::FixTags);
+                }
+                Problem::MismatchedTags | Problem::MismatchedPath => {
+                    actions.insert(Action::FixTags);
+                    actions.insert(Action::MoveFile);
+                    actions.insert(Action::RemoveTags);
+                }
             }
         }
+    } else {
+        actions.insert(Action::RemoveTags);
     }
 
     actions

@@ -83,14 +83,18 @@ pub mod music_file {
             return tag.is_ok();
         }
 
-        pub fn compose_tags_from_path(&self) -> Tags {
-            let mut ret = Tags {
+        pub fn empty_tags() -> Tags {
+            Tags {
                 title: String::new(),
                 album: String::new(),
                 album_artist: String::new(),
                 artist: String::new(),
                 track_number: String::new(),
-            };
+            }
+        }
+
+        pub fn compose_tags_from_path(&self) -> Tags {
+            let mut ret = Self::empty_tags();
             let stem = self.relative_path.file_stem();
             if let Some(title) = stem {
                 ret.title = title.to_str().unwrap().to_string();
