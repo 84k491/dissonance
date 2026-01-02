@@ -213,16 +213,20 @@ impl Application for DissonanceApp {
 
             Message::RootLoaded(nodes) => {
                 self.file_tree = FileTree::from(nodes);
+                println!("Source dir scanned");
 
                 if self.source.is_none() || self.destination.is_none() {
                     return Command::none();
                 }
 
+                println!("Indexing source files...");
                 self.update_index_source();
                 println!(
                     "Index updated with source files: {} files in total",
                     self.sync_info.len()
                 );
+
+                println!("Indexing destination files...");
                 self.update_index_destination(); // TODO async
                 println!(
                     "Index updated with destination files: {} files in total",
@@ -931,6 +935,7 @@ impl DissonanceApp {
 // }
 
 async fn load_root_dir(root_path: PathBuf, target_rel_path: PathBuf) -> Vec<FsEntry> {
+    println!("Scanning source dir");
     return load_dir(root_path, target_rel_path);
 }
 
