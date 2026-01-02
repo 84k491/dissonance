@@ -246,6 +246,7 @@ pub mod music_file {
             };
             ret
         }
+
         pub fn has_problems(&self) -> bool {
             for child in &self.children {
                 match child {

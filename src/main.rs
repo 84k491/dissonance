@@ -5,10 +5,13 @@ use iced::{
 use iced::{Background, Color};
 use serde::{Deserialize, Serialize};
 
-use crate::file_tree::file_tree::{FileTree, FsEntry, load_dir};
 use crate::music_file::music_file::MusicFile;
+use crate::{
+    file_tree::file_tree::{FileTree, FsEntry, load_dir},
+    music_file::music_file::Directory,
+};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     fmt::{self, Display},
     fs::{self, File},
     io::BufWriter,
@@ -60,7 +63,7 @@ impl Display for Problem {
     }
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 enum Action {
     RemoveTags,
     FixTags,
@@ -71,11 +74,11 @@ enum Action {
     // ApplyCustomTags,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Ord, PartialOrd)]
 enum SyncIntention {
+    Unspecified, // top prio
     KeepSync,
-    DropSync,
-    Unspecified,
+    DropSync, // low prio
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -424,16 +427,16 @@ impl DissonanceApp {
         return column;
     }
 
-    fn get_suitable_actions(&self, entry: &FsEntry) -> HashSet<Action> {
+    fn get_suitable_actions(&self, entry: &FsEntry) -> BTreeSet<Action> {
         let mf = match entry {
             FsEntry::FsMusicFile(mf) => mf,
-            _ => return HashSet::new(),
+            _ => return BTreeSet::new(),
         };
         let problems = mf.find_problems();
 
         // TODO don't let fix tags if file doesn't have both parents
 
-        let mut actions = HashSet::<Action>::new();
+        let mut actions = BTreeSet::<Action>::new();
 
         if !problems.is_empty() {
             for p in problems {
@@ -603,6 +606,39 @@ impl DissonanceApp {
         self.selected = Some(tag_based_rel_path);
     }
 
+    fn is_dir_synced(&self, dir: &Directory) -> bool {
+        dir.children
+            .iter()
+            .map(|c| match c {
+                FsEntry::FsFile(_) => false,
+                FsEntry::FsMusicFile(mf) => match self.sync_info.get(&mf.relative_path) {
+                    None => false,
+                    Some(e) => e.synced,
+                },
+                FsEntry::FsDirectory(d) => self.is_dir_synced(d),
+            })
+            .reduce(|acc, v| acc && v)
+            .unwrap_or(false)
+    }
+
+    fn induce_dir_intention(&self, dir: &Directory) -> SyncIntention {
+        let a = dir
+            .children
+            .iter()
+            .map(|c| match c {
+                FsEntry::FsFile(_) => SyncIntention::DropSync,
+                FsEntry::FsMusicFile(mf) => match self.sync_info.get(&mf.relative_path) {
+                    None => SyncIntention::Unspecified,
+                    Some(e) => e.intention.clone(),
+                },
+                FsEntry::FsDirectory(d) => self.induce_dir_intention(d),
+            })
+            .reduce(|acc, v| if acc < v { acc } else { v })
+            .unwrap_or(SyncIntention::Unspecified);
+
+        return a;
+    }
+
     fn render_tree(
         &self,
         nodes: &Vec<FsEntry>,
@@ -616,19 +652,7 @@ impl DissonanceApp {
                 FsEntry::FsMusicFile(mf) => &mf.relative_path,
                 FsEntry::FsDirectory(d) => &d.relative_path,
             };
-            let name = rel_path.file_name().unwrap().to_string_lossy().to_string();
-
-            let label = match node {
-                FsEntry::FsFile(_) => format!("  {}", name),
-                FsEntry::FsMusicFile(_) => format!("  {}", name),
-                FsEntry::FsDirectory(d) => {
-                    if d.expanded {
-                        format!("V {}", name)
-                    } else {
-                        format!("> {}", name)
-                    }
-                }
-            };
+            let label = rel_path.file_name().unwrap().to_string_lossy().to_string();
 
             let button = match node {
                 FsEntry::FsFile(f) => {
@@ -645,16 +669,24 @@ impl DissonanceApp {
                         has_problem: f.has_problems(),
                         intention: sync_info.intention.clone(),
                     };
+                    let prefix = if sync_info.synced { "" } else { "* " };
+                    let label = format!("{}{}", prefix, label);
+
                     button(text(label))
                         .on_press(Message::SelectFile(f.relative_path.clone()))
                         .style(iced::theme::Button::Custom(Box::new(style)))
                 }
                 FsEntry::FsDirectory(d) => {
+                    let synced = self.is_dir_synced(d);
                     let style = ButtonStyle {
-                        synced: true,
-                        has_problem: false,
-                        intention: SyncIntention::KeepSync,
+                        synced: synced,
+                        has_problem: d.has_problems(),
+                        intention: self.induce_dir_intention(d),
                     };
+
+                    let prefix = if synced { "" } else { "* " };
+                    let label = format!("{}{}", prefix, label);
+
                     button(text(label))
                         .on_press(Message::ToggleDir(d.relative_path.clone()))
                         .style(iced::theme::Button::Custom(Box::new(style)))
