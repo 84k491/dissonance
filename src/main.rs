@@ -249,7 +249,7 @@ impl DissonanceApp {
             .map(|k| k.rel_path.clone())
             .collect::<Vec<PathBuf>>();
 
-        // TODO remvoe empty directories
+        let _ = remove_empty_subdirs::remove_empty_subdirs(&self.destination.clone().unwrap());
 
         to_copy_to_dest.iter().for_each(|k| {
             let source_abs_path = self.source.clone().unwrap().join(k);
@@ -732,6 +732,8 @@ impl DissonanceApp {
         }
 
         self.selected = Some(tag_based_rel_path);
+
+        let _ = remove_empty_subdirs::remove_empty_subdirs(&self.source.clone().unwrap());
     }
 
     fn is_dir_synced(&self, dir: &Directory) -> bool {
