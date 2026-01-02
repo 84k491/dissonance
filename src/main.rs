@@ -42,9 +42,18 @@ enum Message {
     StartIndexing,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct AppSavedState {
+    source: Option<PathBuf>,
+    destination: Option<PathBuf>,
+}
+
 struct DissonanceApp {
     file_tree: FileTree,
     selected: Option<PathBuf>,
+
+    input_source: String,
+    input_destination: String,
 
     source: Option<PathBuf>,
     destination: Option<PathBuf>,
@@ -112,6 +121,7 @@ impl Display for Action {
 impl Drop for DissonanceApp {
     fn drop(&mut self) {
         Self::save_index(&self.sync_info);
+        save_state(self.source.clone(), self.destination.clone());
     }
 }
 
@@ -122,16 +132,19 @@ impl Application for DissonanceApp {
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
+        let saved_state = load_saved_state();
         let index = DissonanceApp::load_index();
         (
             Self {
                 file_tree: FileTree::empty(),
+                input_source: saved_state.source.clone().unwrap_or_default().as_os_str().to_string_lossy().into(),
+                input_destination: saved_state.destination.clone().unwrap_or_default().as_os_str().to_string_lossy().into(),
                 selected: None,
-                source: None,
-                destination: None,
+                source: saved_state.source.clone(),
+                destination: saved_state.destination.clone(),
                 sync_info: index,
             },
-            Command::none()
+            Command::none(),
         )
     }
 
@@ -142,18 +155,24 @@ impl Application for DissonanceApp {
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::SourceSet(source_abs_path) => {
+                self.input_source = source_abs_path.clone();
+
                 let path = PathBuf::from(&source_abs_path);
                 if path.exists() && path.is_dir() {
                     self.source = Some(path);
                 }
+
                 Command::none()
             }
 
             Message::DestinationSet(dest_abs_path) => {
+                self.input_destination = dest_abs_path.clone();
+
                 let path = PathBuf::from(&dest_abs_path);
                 if path.exists() && path.is_dir() {
                     self.destination = Some(path);
                 }
+
                 Command::none()
             }
 
@@ -442,29 +461,13 @@ impl DissonanceApp {
     }
 
     fn render_top_panel(&self) -> iced::widget::Row<'static, Message> {
-        let source_str: Option<String> = self
-            .source
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned());
-
-        let dest_str: Option<String> = self
-            .destination
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned());
-
         let targets = column![
-            TextInput::new(
-                "Source...",
-                &source_str.unwrap_or_else(|| String::from("<unset>")),
-            )
-            .on_input(Message::SourceSet)
-            .size(12),
-            TextInput::new(
-                "Destination...",
-                &dest_str.unwrap_or_else(|| String::from("<unset>")),
-            )
-            .on_input(Message::DestinationSet)
-            .size(12),
+            TextInput::new("Source...", &self.input_source,)
+                .on_input(Message::SourceSet)
+                .size(12),
+            TextInput::new("Destination...", &self.input_destination)
+                .on_input(Message::DestinationSet)
+                .size(12),
             row![
                 button(text("Sync").size(16)).on_press(Message::StartSync),
                 button(text("Index").size(16)).on_press(Message::StartIndexing),
@@ -1008,4 +1011,51 @@ impl container::StyleSheet for TreePanelStyle {
             ..Default::default()
         }
     }
+}
+
+fn load_saved_state() -> AppSavedState {
+    let file = match File::open("saved_state.json") {
+        Err(_) => {
+            return AppSavedState {
+                source: None,
+                destination: None,
+            };
+        }
+        Ok(f) => f,
+    };
+
+    let state: AppSavedState = match serde_json::from_reader(file) {
+        Err(_) => {
+            return AppSavedState {
+                source: None,
+                destination: None,
+            };
+        }
+        Ok(m) => m,
+    };
+
+    println!("Saved state loaded from json");
+    state
+}
+
+fn save_state(source: Option<PathBuf>, destination: Option<PathBuf>) {
+    let file = match File::create("saved_state.json") {
+        Err(_) => {
+            println!("Failed to create index.json");
+            return;
+        }
+        Ok(f) => BufWriter::new(f),
+    };
+
+    let ss = AppSavedState {
+        source,
+        destination,
+    };
+
+    match serde_json::to_writer_pretty(file, &ss) {
+        Err(_) => println!("Failed to write to index.json"),
+        Ok(_) => {}
+    }
+
+    println!("Index saved to json");
 }
