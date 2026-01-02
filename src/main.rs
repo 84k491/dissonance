@@ -163,6 +163,7 @@ impl Application for DissonanceApp {
 
             Message::ToggleDir(path) => {
                 self.file_tree.toggle_dir(&path);
+                self.selected = Some(path.clone());
                 Command::none()
             }
 
@@ -183,11 +184,11 @@ impl Application for DissonanceApp {
                 Command::none()
             }
             Message::KeepSync(rel_path) => {
-                self.keep_sync(rel_path);
+                self.set_sync_intention(rel_path, SyncIntention::KeepSync);
                 Command::none()
             }
             Message::DropSync(rel_path) => {
-                self.drop_sync(rel_path);
+                self.set_sync_intention(rel_path, SyncIntention::DropSync);
                 Command::none()
             }
         }
@@ -230,16 +231,32 @@ impl DissonanceApp {
         map
     }
 
-    fn keep_sync(&mut self, rel_path: PathBuf) {
-        self.sync_info
-            .entry(rel_path) // creates new
-            .and_modify(|e| e.intention = SyncIntention::KeepSync);
-    }
+    fn set_sync_intention(&mut self, rel_path: PathBuf, intention: SyncIntention) {
+        let fs_entry = match self.file_tree.find(&rel_path) {
+            Some(e) => e,
+            _ => return,
+        };
 
-    fn drop_sync(&mut self, rel_path: PathBuf) {
-        self.sync_info
-            .entry(rel_path) // creates new
-            .and_modify(|e| e.intention = SyncIntention::DropSync);
+        match fs_entry.clone() {
+            FsEntry::FsDirectory(d) => {
+                for child in d.children.iter() {
+                    let rel_path = match child {
+                        FsEntry::FsFile(f) => f.relative_path.clone(),
+                        FsEntry::FsMusicFile(mf) => mf.relative_path.clone(),
+                        FsEntry::FsDirectory(d) => d.relative_path.clone(),
+                    };
+                    self.set_sync_intention(rel_path, intention.clone());
+                }
+            }
+            FsEntry::FsMusicFile(mf) => {
+                self.sync_info
+                    .entry(mf.relative_path.clone()) // creates new
+                    .and_modify(|e| e.intention = intention.clone());
+            }
+            _ => {}
+        }
+
+        self.update_index_destination();
     }
 
     fn save_index(index: &BTreeMap<PathBuf, SyncedEntry>) {
@@ -427,11 +444,7 @@ impl DissonanceApp {
         return column;
     }
 
-    fn get_suitable_actions(&self, entry: &FsEntry) -> BTreeSet<Action> {
-        let mf = match entry {
-            FsEntry::FsMusicFile(mf) => mf,
-            _ => return BTreeSet::new(),
-        };
+    fn get_suitable_actions_for_music_file(&self, mf: &MusicFile) -> BTreeSet<Action> {
         let problems = mf.find_problems();
 
         // TODO don't let fix tags if file doesn't have both parents
@@ -482,6 +495,35 @@ impl DissonanceApp {
         actions
     }
 
+    fn get_suitable_actions_for_dir(&self, d: &Directory) -> BTreeSet<Action> {
+        let intention = self.induce_dir_intention(d);
+
+        let mut actions = BTreeSet::<Action>::new();
+        match intention {
+            SyncIntention::KeepSync => {
+                actions.insert(Action::DropSync);
+            }
+            SyncIntention::DropSync => {
+                actions.insert(Action::KeepSync);
+            }
+            SyncIntention::Unspecified => {
+                actions.insert(Action::KeepSync);
+                actions.insert(Action::DropSync);
+            }
+        }
+
+        actions
+    }
+
+    fn get_suitable_actions(&self, entry: &FsEntry) -> BTreeSet<Action> {
+        let actions = match entry {
+            FsEntry::FsMusicFile(mf) => self.get_suitable_actions_for_music_file(mf),
+            FsEntry::FsDirectory(d) => self.get_suitable_actions_for_dir(d),
+            _ => return BTreeSet::new(),
+        };
+        return actions;
+    }
+
     fn render_actions_panel(&self) -> iced::widget::Column<'static, Message> {
         if self.source.is_none() || self.selected.is_none() {
             return column![];
@@ -508,27 +550,44 @@ impl DissonanceApp {
             return container(text("No file selected"));
         }
 
-        let mf = MusicFile::new(
-            &self.source.as_ref().unwrap(),
-            &self.selected.as_ref().unwrap(),
-        );
-        if mf.is_none() {
-            return container(text("Not a music file"));
+        let entry = self.file_tree.find(&self.selected.as_ref().unwrap());
+        if entry.is_none() {
+            return container(text("File not found"));
         }
-        let mf = mf.unwrap();
+        let entry = entry.unwrap();
 
-        let tags = mf.tags();
+        match entry {
+            FsEntry::FsFile(f) => {
+                return container(text(f.relative_path.display()).size(16))
+                    .width(Length::Fill)
+                    .height(Length::FillPortion(1))
+                    .align_x(alignment::Horizontal::Left)
+                    .align_y(alignment::Vertical::Top)
+                    .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})));
+            }
+            FsEntry::FsDirectory(d) => {
+                return container(text(d.relative_path.display()).size(16))
+                    .width(Length::Fill)
+                    .height(Length::FillPortion(1))
+                    .align_x(alignment::Horizontal::Left)
+                    .align_y(alignment::Vertical::Top)
+                    .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})));
+            }
+            FsEntry::FsMusicFile(mf) => {
+                let tags = mf.tags();
 
-        container(column!(
-            text(tags.artist).size(16),
-            text(tags.album).size(16),
-            text(tags.title).size(16)
-        ))
-        .width(Length::Fill)
-        .height(Length::FillPortion(1))
-        .align_x(alignment::Horizontal::Left)
-        .align_y(alignment::Vertical::Top)
-        .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
+                container(column!(
+                    text(tags.artist).size(16),
+                    text(tags.album).size(16),
+                    text(tags.title).size(16)
+                ))
+                .width(Length::Fill)
+                .height(Length::FillPortion(1))
+                .align_x(alignment::Horizontal::Left)
+                .align_y(alignment::Vertical::Top)
+                .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
+            }
+        }
     }
 
     fn fix_tags(&mut self, path: PathBuf) {
@@ -665,7 +724,7 @@ impl DissonanceApp {
                         .expect("Can't get sync info on tree render");
 
                     let style = ButtonStyle {
-                        synced: sync_info.synced,
+                        selected: self.selected == Some(f.relative_path.clone()),
                         has_problem: f.has_problems(),
                         intention: sync_info.intention.clone(),
                     };
@@ -679,7 +738,7 @@ impl DissonanceApp {
                 FsEntry::FsDirectory(d) => {
                     let synced = self.is_dir_synced(d);
                     let style = ButtonStyle {
-                        synced: synced,
+                        selected: self.selected == Some(d.relative_path.clone()),
                         has_problem: d.has_problems(),
                         intention: self.induce_dir_intention(d),
                     };
@@ -709,6 +768,7 @@ impl DissonanceApp {
     }
 }
 
+// TODO remove
 // fn print_tree(tree: &Vec<FsEntry>) {
 //     for entry in tree {
 //         match entry {
@@ -769,19 +829,19 @@ impl container::StyleSheet for PaneStyle {
 }
 
 struct ButtonStyle {
-    synced: bool,
+    selected: bool,
     has_problem: bool,
     intention: SyncIntention,
 }
 
 impl ButtonStyle {
     fn bg_color(&self) -> Color {
-        let coef = if self.synced { 0.5 } else { 1.0 };
+        let coef = if self.selected { 0.7 } else { 1.0 };
 
         match self.intention {
-            SyncIntention::KeepSync => Color::from_rgb(0.80 * coef, 0.80 * coef, 0.80 * coef),
-            SyncIntention::DropSync => Color::from_rgb(0.30 * coef, 0.30 * coef, 0.30 * coef),
-            SyncIntention::Unspecified => Color::from_rgb(0.20 * coef, 0.80 * coef, 0.80 * coef),
+            SyncIntention::KeepSync => Color::from_rgb(0.90 * coef, 0.90 * coef, 0.90 * coef),
+            SyncIntention::DropSync => Color::from_rgb(0.80 * coef, 0.60 * coef, 0.60 * coef),
+            SyncIntention::Unspecified => Color::from_rgb(0.20 * coef, 0.90 * coef, 0.90 * coef),
         }
     }
 
