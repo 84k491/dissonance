@@ -1,6 +1,6 @@
 use iced::{
     Application, Command, Element, Length, Settings, Theme, alignment, executor,
-    widget::{Column, button, column, container, row, scrollable, text},
+    widget::{Column, TextInput, button, column, container, row, scrollable, text},
 };
 use iced::{Background, Color};
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,8 @@ fn main() -> iced::Result {
 
 #[derive(Debug, Clone)]
 enum Message {
-    SourceSet(PathBuf),
+    SourceSet(String),
+    DestinationSet(String),
     RootLoaded(Vec<FsEntry>),
     ToggleDir(PathBuf),
     SelectFile(PathBuf),
@@ -38,6 +39,7 @@ enum Message {
     KeepSync(PathBuf),
     DropSync(PathBuf),
     StartSync,
+    StartIndexing,
 }
 
 struct DissonanceApp {
@@ -120,19 +122,16 @@ impl Application for DissonanceApp {
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
-        let s = PathBuf::from("/home/bakar/tmp/mu/source");
-        let d = PathBuf::from("/home/bakar/tmp/mu/dest");
-
         let index = DissonanceApp::load_index();
         (
             Self {
                 file_tree: FileTree::empty(),
                 selected: None,
-                source: Some(s),
-                destination: Some(d),
+                source: None,
+                destination: None,
                 sync_info: index,
             },
-            Command::perform(get_source(), Message::SourceSet),
+            Command::none()
         )
     }
 
@@ -142,13 +141,29 @@ impl Application for DissonanceApp {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
-            Message::SourceSet(root_path) => Command::perform(
-                load_root_dir(root_path.clone(), root_path),
-                Message::RootLoaded,
-            ),
+            Message::SourceSet(source_abs_path) => {
+                let path = PathBuf::from(&source_abs_path);
+                if path.exists() && path.is_dir() {
+                    self.source = Some(path);
+                }
+                Command::none()
+            }
+
+            Message::DestinationSet(dest_abs_path) => {
+                let path = PathBuf::from(&dest_abs_path);
+                if path.exists() && path.is_dir() {
+                    self.destination = Some(path);
+                }
+                Command::none()
+            }
 
             Message::RootLoaded(nodes) => {
                 self.file_tree = FileTree::from(nodes);
+
+                if self.source.is_none() || self.destination.is_none() {
+                    return Command::none();
+                }
+
                 self.update_index_source();
                 println!(
                     "Index updated with source files: {} files in total",
@@ -159,6 +174,7 @@ impl Application for DissonanceApp {
                     "Index updated with destination files: {} files in total",
                     self.sync_info.len()
                 );
+
                 Command::none()
             }
 
@@ -195,6 +211,13 @@ impl Application for DissonanceApp {
             Message::StartSync => {
                 self.sync_with_destination();
                 Command::none()
+            }
+            Message::StartIndexing => {
+                let source = self.source.as_ref().unwrap();
+                Command::perform(
+                    load_root_dir(source.clone(), source.clone()),
+                    Message::RootLoaded,
+                )
             }
         }
     }
@@ -430,15 +453,22 @@ impl DissonanceApp {
             .map(|p| p.to_string_lossy().into_owned());
 
         let targets = column![
-            text(format!(
-                "Source: {}",
-                source_str.unwrap_or_else(|| String::from("<unset>"))
-            )),
-            text(format!(
-                "Destination: {}",
-                dest_str.unwrap_or_else(|| String::from("<unset>"))
-            )),
-            button(text("Sync").size(16)).on_press(Message::StartSync),
+            TextInput::new(
+                "Source...",
+                &source_str.unwrap_or_else(|| String::from("<unset>")),
+            )
+            .on_input(Message::SourceSet)
+            .size(12),
+            TextInput::new(
+                "Destination...",
+                &dest_str.unwrap_or_else(|| String::from("<unset>")),
+            )
+            .on_input(Message::DestinationSet)
+            .size(12),
+            row![
+                button(text("Sync").size(16)).on_press(Message::StartSync),
+                button(text("Index").size(16)).on_press(Message::StartIndexing),
+            ]
         ];
 
         row![targets]
@@ -856,11 +886,6 @@ impl DissonanceApp {
 //         }
 //     }
 // }
-
-async fn get_source() -> PathBuf {
-    let s = PathBuf::from("/home/bakar/tmp/mu/source");
-    s
-}
 
 async fn load_root_dir(root_path: PathBuf, target_rel_path: PathBuf) -> Vec<FsEntry> {
     return load_dir(root_path, target_rel_path);
