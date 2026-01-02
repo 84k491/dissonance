@@ -37,6 +37,7 @@ enum Message {
     MoveFile(PathBuf),
     KeepSync(PathBuf),
     DropSync(PathBuf),
+    StartSync,
 }
 
 struct DissonanceApp {
@@ -184,11 +185,15 @@ impl Application for DissonanceApp {
                 Command::none()
             }
             Message::KeepSync(rel_path) => {
-                self.set_sync_intention(rel_path, SyncIntention::KeepSync);
+                self.set_sync_intention(rel_path, SyncIntention::KeepSync, true);
                 Command::none()
             }
             Message::DropSync(rel_path) => {
-                self.set_sync_intention(rel_path, SyncIntention::DropSync);
+                self.set_sync_intention(rel_path, SyncIntention::DropSync, true);
+                Command::none()
+            }
+            Message::StartSync => {
+                self.sync_with_destination();
                 Command::none()
             }
         }
@@ -216,6 +221,62 @@ impl Application for DissonanceApp {
 }
 
 impl DissonanceApp {
+    fn sync_with_destination(&mut self) {
+        println!("Syncing with destination");
+
+        let unsynced = self
+            .sync_info
+            .iter()
+            .filter(|(_, e)| !e.synced)
+            .map(|(_, v)| v.clone())
+            .collect::<Vec<SyncedEntry>>();
+
+        let to_remove_from_dest = unsynced
+            .iter()
+            .filter(|k| k.intention == SyncIntention::DropSync)
+            .map(|k| k.rel_path.clone())
+            .collect::<Vec<PathBuf>>();
+
+        to_remove_from_dest.iter().for_each(|k| {
+            let abs_path = self.destination.clone().unwrap().join(k);
+            std::fs::remove_file(&abs_path).unwrap();
+            println!("Removed: {}", abs_path.display());
+        });
+
+        let to_copy_to_dest = unsynced
+            .iter()
+            .filter(|k| k.intention == SyncIntention::KeepSync)
+            .map(|k| k.rel_path.clone())
+            .collect::<Vec<PathBuf>>();
+
+        // TODO remvoe empty directories
+
+        to_copy_to_dest.iter().for_each(|k| {
+            let source_abs_path = self.source.clone().unwrap().join(k);
+            let dest_abs_path = self.destination.clone().unwrap().join(k);
+
+            match fs::create_dir_all(dest_abs_path.parent().expect("No parent on mkdir")) {
+                Err(e) => println!(
+                    "ERROR Failed to create dir: {} ({})",
+                    dest_abs_path.display(),
+                    e
+                ),
+                Ok(_) => {}
+            }
+
+            match std::fs::copy(&source_abs_path, &dest_abs_path) {
+                Err(e) => println!(
+                    "ERROR Failed to copy: {} ({})",
+                    source_abs_path.display(),
+                    e
+                ),
+                Ok(_) => println!("Copied: {}", dest_abs_path.display()),
+            }
+        });
+
+        self.update_index_destination();
+    }
+
     fn load_index() -> BTreeMap<PathBuf, SyncedEntry> {
         let file = match File::open("index.json") {
             Err(_) => return BTreeMap::new(),
@@ -231,7 +292,12 @@ impl DissonanceApp {
         map
     }
 
-    fn set_sync_intention(&mut self, rel_path: PathBuf, intention: SyncIntention) {
+    fn set_sync_intention(
+        &mut self,
+        rel_path: PathBuf,
+        intention: SyncIntention,
+        top_level_recursion: bool,
+    ) {
         let fs_entry = match self.file_tree.find(&rel_path) {
             Some(e) => e,
             _ => return,
@@ -245,7 +311,7 @@ impl DissonanceApp {
                         FsEntry::FsMusicFile(mf) => mf.relative_path.clone(),
                         FsEntry::FsDirectory(d) => d.relative_path.clone(),
                     };
-                    self.set_sync_intention(rel_path, intention.clone());
+                    self.set_sync_intention(rel_path, intention.clone(), false);
                 }
             }
             FsEntry::FsMusicFile(mf) => {
@@ -256,7 +322,9 @@ impl DissonanceApp {
             _ => {}
         }
 
-        self.update_index_destination();
+        if top_level_recursion {
+            self.update_index_destination();
+        }
     }
 
     fn save_index(index: &BTreeMap<PathBuf, SyncedEntry>) {
@@ -370,6 +438,7 @@ impl DissonanceApp {
                 "Destination: {}",
                 dest_str.unwrap_or_else(|| String::from("<unset>"))
             )),
+            button(text("Sync").size(16)).on_press(Message::StartSync),
         ];
 
         row![targets]
