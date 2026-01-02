@@ -28,8 +28,10 @@ fn main() -> iced::Result {
 
 #[derive(Debug, Clone)]
 enum Message {
-    SourceSet(String),
-    DestinationSet(String),
+    SourceUpdated(String),
+    SourceSubmited,
+    DestinationUpdated(String),
+    DestinationSubmited,
     RootLoaded(Vec<FsEntry>),
     ToggleDir(PathBuf),
     SelectFile(PathBuf),
@@ -47,6 +49,10 @@ struct AppSavedState {
     source: Option<PathBuf>,
     destination: Option<PathBuf>,
 }
+
+static CONFIG_ABS_PATH: &'static str = "/home/bakar/.config/dissonance";
+static STATE_FILENAME: &'static str = "saved_state.json";
+static INDEX_FILENAME: &'static str = "index.json";
 
 struct DissonanceApp {
     file_tree: FileTree,
@@ -137,8 +143,20 @@ impl Application for DissonanceApp {
         (
             Self {
                 file_tree: FileTree::empty(),
-                input_source: saved_state.source.clone().unwrap_or_default().as_os_str().to_string_lossy().into(),
-                input_destination: saved_state.destination.clone().unwrap_or_default().as_os_str().to_string_lossy().into(),
+                input_source: saved_state
+                    .source
+                    .clone()
+                    .unwrap_or_default()
+                    .as_os_str()
+                    .to_string_lossy()
+                    .into(),
+                input_destination: saved_state
+                    .destination
+                    .clone()
+                    .unwrap_or_default()
+                    .as_os_str()
+                    .to_string_lossy()
+                    .into(),
                 selected: None,
                 source: saved_state.source.clone(),
                 destination: saved_state.destination.clone(),
@@ -154,10 +172,14 @@ impl Application for DissonanceApp {
 
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
-            Message::SourceSet(source_abs_path) => {
+            Message::SourceUpdated(source_abs_path) => {
                 self.input_source = source_abs_path.clone();
 
-                let path = PathBuf::from(&source_abs_path);
+                Command::none()
+            }
+
+            Message::SourceSubmited => {
+                let path = PathBuf::from(self.input_source.clone());
                 if path.exists() && path.is_dir() {
                     self.source = Some(path);
                 }
@@ -165,15 +187,28 @@ impl Application for DissonanceApp {
                 Command::none()
             }
 
-            Message::DestinationSet(dest_abs_path) => {
+            Message::DestinationUpdated(dest_abs_path) => {
                 self.input_destination = dest_abs_path.clone();
 
-                let path = PathBuf::from(&dest_abs_path);
+                Command::none()
+            }
+
+            Message::DestinationSubmited => {
+                let path = PathBuf::from(self.input_destination.clone());
                 if path.exists() && path.is_dir() {
                     self.destination = Some(path);
                 }
 
                 Command::none()
+            }
+
+            Message::StartIndexing => {
+                // TODO check if there is a source
+                let source = self.source.as_ref().unwrap();
+                Command::perform(
+                    load_root_dir(source.clone(), source.clone()),
+                    Message::RootLoaded,
+                )
             }
 
             Message::RootLoaded(nodes) => {
@@ -230,13 +265,6 @@ impl Application for DissonanceApp {
             Message::StartSync => {
                 self.sync_with_destination();
                 Command::none()
-            }
-            Message::StartIndexing => {
-                let source = self.source.as_ref().unwrap();
-                Command::perform(
-                    load_root_dir(source.clone(), source.clone()),
-                    Message::RootLoaded,
-                )
             }
         }
     }
@@ -320,8 +348,12 @@ impl DissonanceApp {
     }
 
     fn load_index() -> BTreeMap<PathBuf, SyncedEntry> {
-        let file = match File::open("index.json") {
-            Err(_) => return BTreeMap::new(),
+        let path = PathBuf::from(CONFIG_ABS_PATH).join(INDEX_FILENAME);
+        let file = match File::open(path) {
+            Err(e) => {
+                println!("Failed to open index: {}", e);
+                return BTreeMap::new();
+            }
             Ok(f) => f,
         };
 
@@ -370,7 +402,13 @@ impl DissonanceApp {
     }
 
     fn save_index(index: &BTreeMap<PathBuf, SyncedEntry>) {
-        let file = match File::create("index.json") {
+        let path = PathBuf::from(CONFIG_ABS_PATH).join(INDEX_FILENAME);
+        match fs::create_dir_all(path.parent().expect("No parent on index save")) {
+            Err(e) => println!("Failed to create dir {}: {}", path.display(), e),
+            Ok(_) => {}
+        }
+
+        let file = match File::create(path) {
             Err(_) => {
                 println!("Failed to create index.json");
                 return;
@@ -383,7 +421,7 @@ impl DissonanceApp {
             Ok(_) => {}
         }
 
-        println!("Index saved to json: {} files", index.len());
+        println!("Index saved: {} files", index.len());
     }
 
     fn update_index_source(&mut self) {
@@ -463,10 +501,12 @@ impl DissonanceApp {
     fn render_top_panel(&self) -> iced::widget::Row<'static, Message> {
         let targets = column![
             TextInput::new("Source...", &self.input_source,)
-                .on_input(Message::SourceSet)
+                .on_input(Message::SourceUpdated)
+                .on_submit(Message::SourceSubmited)
                 .size(12),
             TextInput::new("Destination...", &self.input_destination)
-                .on_input(Message::DestinationSet)
+                .on_input(Message::DestinationUpdated)
+                .on_submit(Message::DestinationSubmited)
                 .size(12),
             row![
                 button(text("Sync").size(16)).on_press(Message::StartSync),
@@ -1014,8 +1054,10 @@ impl container::StyleSheet for TreePanelStyle {
 }
 
 fn load_saved_state() -> AppSavedState {
-    let file = match File::open("saved_state.json") {
-        Err(_) => {
+    let path = PathBuf::from(CONFIG_ABS_PATH).join(STATE_FILENAME);
+    let file = match File::open(&path) {
+        Err(e) => {
+            println!("Failed to open saved state {}: {}", path.display(), e);
             return AppSavedState {
                 source: None,
                 destination: None,
@@ -1039,7 +1081,13 @@ fn load_saved_state() -> AppSavedState {
 }
 
 fn save_state(source: Option<PathBuf>, destination: Option<PathBuf>) {
-    let file = match File::create("saved_state.json") {
+    let path = PathBuf::from(CONFIG_ABS_PATH).join(STATE_FILENAME);
+    match fs::create_dir_all(path.parent().expect("No parent on state save")) {
+        Err(e) => println!("Failed to create dir {}: {}", path.display(), e),
+        Ok(_) => {}
+    }
+
+    let file = match File::create(path) {
         Err(_) => {
             println!("Failed to create index.json");
             return;
@@ -1057,5 +1105,5 @@ fn save_state(source: Option<PathBuf>, destination: Option<PathBuf>) {
         Ok(_) => {}
     }
 
-    println!("Index saved to json");
+    println!("State saved");
 }
