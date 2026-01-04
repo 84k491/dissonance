@@ -55,23 +55,6 @@ pub mod music_file {
             Some(ret)
         }
 
-        pub fn new(base: &PathBuf, relative: &PathBuf) -> Option<MusicFile> {
-            let mut ret = MusicFile {
-                base_path: base.clone(),
-                relative_path: relative.clone(),
-                has_problems: true,
-            };
-
-            if ret.tag_available() {
-                let problems = ret.find_problems();
-                ret.has_problems = !problems.is_empty();
-
-                return Some(ret);
-            }
-
-            return None;
-        }
-
         pub fn has_problems(&self) -> bool {
             return self.has_problems;
         }

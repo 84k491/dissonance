@@ -5,7 +5,7 @@ use iced::{
 use iced::{Background, Color};
 use serde::{Deserialize, Serialize};
 
-use crate::music_file::music_file::MusicFile;
+use crate::{file_tree::file_tree::load_dir_hash_set_files_only, music_file::music_file::MusicFile};
 use crate::{
     file_tree::file_tree::{FileTree, FsEntry, load_dir},
     music_file::music_file::Directory,
@@ -463,9 +463,7 @@ impl DissonanceApp {
             return;
         }
 
-        let dest_entries = load_dir(self.destination.clone().unwrap(), PathBuf::new());
-        let dest_tree = FileTree::from(dest_entries);
-        let dest_entries = dest_tree.flat();
+        let dest_entries = load_dir_hash_set_files_only(self.destination.clone().unwrap(), PathBuf::new());
 
         // add to index (with {drop, unsync}) those entries that are in dest, but not in index // they will be removed from index on next local scan
         let to_add_to_index: BTreeMap<PathBuf, SyncedEntry> = dest_entries
@@ -564,10 +562,12 @@ impl DissonanceApp {
         if self.source.is_none() || self.selected.is_none() {
             return column![];
         }
-        let entry = FsEntry::from(
-            self.source.as_ref().unwrap(),
-            self.selected.as_ref().unwrap(),
-        );
+        let selected_path = self.selected.as_ref().unwrap();
+        let entry = self.file_tree.find(selected_path);
+        if entry.is_none() {
+            return column![];
+        }
+        let entry = entry.unwrap();
 
         let problems = match entry {
             FsEntry::FsFile(_) => {
@@ -674,10 +674,13 @@ impl DissonanceApp {
         if self.source.is_none() || self.selected.is_none() {
             return column![];
         }
-        let entry = FsEntry::from(
-            self.source.as_ref().unwrap(),
-            self.selected.as_ref().unwrap(),
-        );
+
+        let selected_path = self.selected.as_ref().unwrap();
+        let entry = self.file_tree.find(selected_path);
+        if entry.is_none() {
+            return column![];
+        }
+        let entry = entry.unwrap();
 
         let actions = self.get_suitable_actions(&entry);
 

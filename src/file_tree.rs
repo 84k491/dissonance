@@ -24,6 +24,7 @@ pub mod file_tree {
                 return FsEntry::FsDirectory(d);
             } else {
                 let f = File::new(&root_path, &relative_path);
+
                 let mf = MusicFile::from(f.clone());
                 if let None = mf {
                     return FsEntry::FsFile(f);
@@ -239,6 +240,45 @@ pub mod file_tree {
 
             let e = FsEntry::from(&root_path, &relative_path);
             nodes.push(e);
+        }
+
+        nodes
+    }
+
+    pub fn load_dir_hash_set_files_only(
+        root_path: PathBuf,
+        target_rel_path: PathBuf,
+    ) -> HashSet<PathBuf> {
+        let mut nodes = HashSet::new();
+        let target_abs_path = root_path.join(&target_rel_path);
+
+        let read_dir = std::fs::read_dir(&target_abs_path);
+        if let Err(_) = read_dir {
+            return HashSet::new();
+        }
+
+        let read_dir = read_dir.unwrap();
+
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => {
+                    continue;
+                }
+            };
+
+            let absolute_path = entry.path().clone();
+            let relative_path = diff_paths(&absolute_path, &root_path)
+                .expect("Can't create relative path")
+                .to_path_buf();
+
+            if absolute_path.is_file() {
+                nodes.insert(relative_path);
+                continue;
+            }
+
+            let children = load_dir_hash_set_files_only(root_path.clone(), relative_path);
+            nodes.extend(children);
         }
 
         nodes
