@@ -1,5 +1,5 @@
 use iced::{
-    Background, Color, Theme,
+    Background, Color, Theme, color,
     widget::{button, container},
 };
 
@@ -48,12 +48,14 @@ impl ButtonStyle {
     fn bg_color(&self) -> Color {
         let coef = if self.selected { 0.7 } else { 1.0 };
 
-        match self.intention {
-            SyncIntention::KeepSync => Color::from_rgb(0.90 * coef, 0.90 * coef, 0.90 * coef),
-            SyncIntention::DropSync => Color::from_rgb(0.80 * coef, 0.60 * coef, 0.60 * coef),
-            SyncIntention::Unspecified => Color::from_rgb(0.20 * coef, 0.90 * coef, 0.90 * coef),
-            SyncIntention::MixedDir => Color::from_rgb(0.90 * coef, 0.90 * coef, 0.60 * coef),
-        }
+        let color = match self.intention {
+            SyncIntention::KeepSync => Color::from_rgb(0.83 * coef, 0.89 * coef, 1.0 * coef),
+            SyncIntention::DropSync => Color::from_rgb(0.97 * coef, 0.84 * coef, 0.85 * coef),
+            SyncIntention::Unspecified => Color::from_rgb(1.0 * coef, 0.9 * coef, 0.7 * coef),
+            SyncIntention::MixedDir => Color::from_rgb(0.9 * coef, 0.85 * coef, 0.94 * coef),
+        };
+
+        return color;
     }
 
     fn text_color(&self) -> Color {
@@ -114,7 +116,7 @@ impl container::StyleSheet for TreePanelStyle {
     type Style = Theme;
     fn appearance(&self, _style: &Theme) -> container::Appearance {
         container::Appearance {
-            background: Some(Background::Color(Color::from_rgb(0.70, 0.70, 0.70))),
+            background: Some(Background::Color(Color::from_rgb(1.0, 1.0, 1.0))),
             border: iced::Border {
                 color: Color::BLACK,
                 width: 2.0,
