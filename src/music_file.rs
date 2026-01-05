@@ -20,16 +20,17 @@ pub mod music_file {
         }
 
         pub fn is_music_file(&self) -> bool {
-            let music_file_extencions = HashSet::from(["mp3", "wav", "flac"]);
+            let music_file_extensions = HashSet::from(["mp3", "wav", "flac"]);
 
             let ext = match self.relative_path.extension() {
                 None => return false,
                 Some(e) => e,
             }
             .to_string_lossy()
-            .into_owned();
+            .into_owned()
+            .to_lowercase();
 
-            return music_file_extencions.contains(ext.as_str());
+            return music_file_extensions.contains(ext.as_str());
         }
     }
 

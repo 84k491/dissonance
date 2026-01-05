@@ -328,8 +328,12 @@ impl DissonanceApp {
         to_remove_from_dest.iter().for_each(|k| {
             let abs_path = self.destination.clone().unwrap().join(k);
             std::fs::remove_file(&abs_path).unwrap();
-            // TODO remove from self dest files
-            // TODO update sync info
+
+            let dfiles = self.destination_files.as_mut().unwrap();
+            let p = k.clone();
+            dfiles.remove(&p);
+            self.sync_info.get_mut(k).unwrap().synced = true;
+
             println!("Removed: {}", abs_path.display());
         });
 
@@ -338,10 +342,6 @@ impl DissonanceApp {
             .filter(|k| k.intention == SyncIntention::KeepSync)
             .map(|k| k.rel_path.clone())
             .collect::<Vec<PathBuf>>();
-
-        println!("Removing empty subdirs");
-        let _ = remove_empty_subdirs::remove_empty_subdirs(&self.destination.clone().unwrap());
-        println!("Finished removing empty subdirs");
 
         to_copy_to_dest.iter().for_each(|k| {
             let source_abs_path = self.source.clone().unwrap().join(k);
@@ -363,17 +363,19 @@ impl DissonanceApp {
                     e
                 ),
                 Ok(_) => {
-                    // TODO add to self dest files
-                    // TODO update sync info
+                    let dfiles = self.destination_files.as_mut().unwrap();
+                    dfiles.insert(k.clone());
+                    self.sync_info.get_mut(k).unwrap().synced = true;
+
                     println!("Copied: {}", dest_abs_path.display())
                 }
             }
         });
 
-        if let Some(dfiles) = &self.destination_files {
-            let dfiles = dfiles.clone(); // TODO avoid clone
-            self.update_index_destination(&dfiles); // TODO remove, set sync locally
-        }
+        println!("Removing empty subdirs");
+        let _ = remove_empty_subdirs::remove_empty_subdirs(&self.destination.clone().unwrap());
+        
+        println!("Finished sync");
     }
 
     fn load_index() -> BTreeMap<PathBuf, SyncedEntry> {
@@ -946,24 +948,6 @@ impl DissonanceApp {
         col
     }
 }
-
-// TODO remove
-// fn print_tree(tree: &Vec<FsEntry>) {
-//     for entry in tree {
-//         match entry {
-//             FsEntry::FsFile(f) => {
-//                 println!("File: {}", f.relative_path.display());
-//             }
-//             FsEntry::FsDirectory(d) => {
-//                 println!("Directory: {}", d.relative_path.display());
-//                 print_tree(&d.children);
-//             }
-//             FsEntry::FsMusicFile(mf) => {
-//                 println!("MusicFile: {}", mf.relative_path.display());
-//             }
-//         }
-//     }
-// }
 
 async fn load_root_dir(root_path: PathBuf, target_rel_path: PathBuf) -> Vec<FsEntry> {
     println!("Scanning source dir");
