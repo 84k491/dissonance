@@ -1,0 +1,9 @@
+# mixed intention for directories
+
+# more convinient source/destination selection
+# showing sync progress in a separate window
+# aborting on an error with a toast
+# detecting album art absense, auto load, showing album art in UI
+# modifying tags in UI
+# polish UI
+# showing source/destination availability in UI
