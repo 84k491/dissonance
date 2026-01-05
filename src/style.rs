@@ -52,6 +52,7 @@ impl ButtonStyle {
             SyncIntention::KeepSync => Color::from_rgb(0.90 * coef, 0.90 * coef, 0.90 * coef),
             SyncIntention::DropSync => Color::from_rgb(0.80 * coef, 0.60 * coef, 0.60 * coef),
             SyncIntention::Unspecified => Color::from_rgb(0.20 * coef, 0.90 * coef, 0.90 * coef),
+            SyncIntention::MixedDir => Color::from_rgb(0.90 * coef, 0.90 * coef, 0.60 * coef),
         }
     }
 

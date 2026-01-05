@@ -4,7 +4,7 @@ use iced::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::style::{ActionPanelStyle, InfoPanelStyle, PaneStyle, TreePanelStyle, ButtonStyle};
+use crate::style::{ActionPanelStyle, ButtonStyle, InfoPanelStyle, PaneStyle, TreePanelStyle};
 use crate::{
     file_tree::file_tree::load_dir_hash_set_files_only, music_file::music_file::MusicFile,
 };
@@ -99,6 +99,7 @@ enum Action {
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Ord, PartialOrd)]
 enum SyncIntention {
     Unspecified, // top prio
+    MixedDir,
     KeepSync,
     DropSync, // low prio
 }
@@ -296,9 +297,7 @@ impl Application for DissonanceApp {
             container(top_panel)
                 .height(Length::FillPortion(1))
                 .width(Length::Fill)
-                .style(iced::theme::Container::Custom(Box::new(
-                    PaneStyle::Left
-                )))
+                .style(iced::theme::Container::Custom(Box::new(PaneStyle::Left)))
                 .padding(10),
             container(main_panel)
                 .height(Length::FillPortion(6))
@@ -529,6 +528,13 @@ impl DissonanceApp {
                 SyncIntention::Unspecified => {
                     e.synced = false;
                 }
+                SyncIntention::MixedDir => {
+                    println!(
+                        "WARN: MixedDir intention for a file: {}",
+                        rel_path.display()
+                    );
+                    e.synced = false;
+                }
             };
         }
     }
@@ -669,6 +675,12 @@ impl DissonanceApp {
                 actions.insert(Action::KeepSync);
                 actions.insert(Action::DropSync);
             }
+            SyncIntention::MixedDir => {
+                println!(
+                    "WARN: MixedDir intention for a music file: {}",
+                    mf.relative_path.display()
+                );
+            }
         }
 
         actions
@@ -685,7 +697,7 @@ impl DissonanceApp {
             SyncIntention::DropSync => {
                 actions.insert(Action::KeepSync);
             }
-            SyncIntention::Unspecified => {
+            SyncIntention::Unspecified | SyncIntention::MixedDir => {
                 actions.insert(Action::KeepSync);
                 actions.insert(Action::DropSync);
             }
@@ -876,7 +888,20 @@ impl DissonanceApp {
                 },
                 FsEntry::FsDirectory(d) => self.induce_dir_intention(d),
             })
-            .reduce(|acc, v| if acc < v { acc } else { v })
+            .reduce(|acc, v| match (acc, v) {
+                (SyncIntention::Unspecified, _) => SyncIntention::Unspecified,
+                (_, SyncIntention::Unspecified) => SyncIntention::Unspecified,
+
+                (SyncIntention::KeepSync, SyncIntention::KeepSync) => SyncIntention::KeepSync,
+                (SyncIntention::KeepSync, SyncIntention::DropSync) => SyncIntention::MixedDir,
+                (SyncIntention::KeepSync, SyncIntention::MixedDir) => SyncIntention::MixedDir,
+
+                (SyncIntention::DropSync, SyncIntention::KeepSync) => SyncIntention::MixedDir,
+                (SyncIntention::DropSync, SyncIntention::DropSync) => SyncIntention::DropSync,
+                (SyncIntention::DropSync, SyncIntention::MixedDir) => SyncIntention::MixedDir,
+
+                (SyncIntention::MixedDir, _) => SyncIntention::MixedDir,
+            })
             .unwrap_or(SyncIntention::Unspecified);
 
         return a;
