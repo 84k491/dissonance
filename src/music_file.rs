@@ -2,17 +2,17 @@ pub mod music_file {
     use crate::tags::tags::Tags;
     use crate::{FsEntry, Problem};
     use audiotags::Tag;
-    use std::collections::HashSet;
+    use std::collections::{BTreeSet, HashSet};
     use std::path::PathBuf;
 
     #[derive(Debug, Clone)]
-    pub struct File {
+    pub struct InvalidFile {
         pub base_path: PathBuf,
         pub relative_path: PathBuf,
     }
-    impl File {
-        pub fn new(base: &PathBuf, relative: &PathBuf) -> File {
-            let ret = File {
+    impl InvalidFile {
+        pub fn new(base: &PathBuf, relative: &PathBuf) -> InvalidFile {
+            let ret = InvalidFile {
                 base_path: base.clone(),
                 relative_path: relative.clone(),
             };
@@ -32,16 +32,22 @@ pub mod music_file {
 
             return music_file_extensions.contains(ext.as_str());
         }
+
+        pub fn find_problems(&self) -> BTreeSet<Problem> {
+            return [Problem::InvalidFile].into_iter().collect();
+        }
     }
 
     #[derive(Debug, Clone)]
     pub struct MusicFile {
         pub base_path: PathBuf,
         pub relative_path: PathBuf,
+
         has_problems: bool,
     }
     impl MusicFile {
-        pub fn from(simple_file: File) -> Option<MusicFile> {
+        pub fn from(simple_file: InvalidFile) -> Option<MusicFile> {
+            // TODO use path as arg
             if !simple_file.is_music_file() {
                 return None;
             }
@@ -125,7 +131,11 @@ pub mod music_file {
             let tag = match tag {
                 Ok(t) => t,
                 Err(err) => {
-                    println!("Tags: Error reading tags of a file: {}: {}", full_path.display(), err);
+                    println!(
+                        "Tags: Error reading tags of a file: {}: {}",
+                        full_path.display(),
+                        err
+                    );
                     return Self::empty_tags();
                 }
             };
@@ -195,11 +205,11 @@ pub mod music_file {
         //     tag.remove_track_number();
         // }
 
-        pub fn find_problems(&self) -> Vec<Problem> {
-            let mut ret = Vec::<Problem>::new();
+        pub fn find_problems(&self) -> BTreeSet<Problem> {
+            let mut ret = BTreeSet::<Problem>::new();
 
             if !self.tag_available() {
-                ret.push(Problem::MissingTags);
+                ret.insert(Problem::MissingTags);
             }
 
             let installed_tags = self.tags();
@@ -207,13 +217,13 @@ pub mod music_file {
             path_tags.track_number = installed_tags.track_number.clone();
 
             if path_tags != installed_tags {
-                ret.push(Problem::MismatchedTags);
+                ret.insert(Problem::MismatchedTags);
             }
 
             let tags_path = self.compose_path_from_tags(&installed_tags);
 
             if self.relative_path != tags_path {
-                ret.push(Problem::MismatchedPath);
+                ret.insert(Problem::MismatchedPath);
             }
 
             return ret;
@@ -258,6 +268,35 @@ pub mod music_file {
             }
 
             return false;
+        }
+
+        pub fn find_problems_conj(&self) -> BTreeSet<Problem> {
+            let mut ret = BTreeSet::<Problem>::new();
+
+            if self.children.is_empty() {
+                ret.insert(Problem::EmptyDirectory);
+                return ret;
+            }
+
+            let mut first = true;
+
+            for e in &self.children {
+                let problems = match e {
+                    FsEntry::FsDirectory(d) => d.find_problems_conj(),
+                    FsEntry::FsFile(f) => f.find_problems(),
+                    FsEntry::FsMusicFile(mf) => mf.find_problems(),
+                };
+
+                if first {
+                    first = false;
+                    ret.extend(problems);
+                    continue;
+                }
+
+                ret = ret.intersection(&problems).cloned().collect();
+            }
+
+            return ret;
         }
     }
 }

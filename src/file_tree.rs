@@ -1,6 +1,6 @@
 pub mod file_tree {
 
-    use crate::music_file::music_file::{Directory, File, MusicFile};
+    use crate::music_file::music_file::{Directory, InvalidFile, MusicFile};
     use pathdiff::diff_paths;
     use std::{
         collections::HashSet,
@@ -9,7 +9,7 @@ pub mod file_tree {
 
     #[derive(Debug, Clone)]
     pub enum FsEntry {
-        FsFile(File),
+        FsFile(InvalidFile),
         FsMusicFile(MusicFile),
         FsDirectory(Directory),
     }
@@ -23,7 +23,7 @@ pub mod file_tree {
                 let d = Directory::new(&root_path, relative_path, children);
                 return FsEntry::FsDirectory(d);
             } else {
-                let f = File::new(&root_path, &relative_path);
+                let f = InvalidFile::new(&root_path, &relative_path);
 
                 let mf = MusicFile::from(f.clone());
                 if let None = mf {
@@ -32,6 +32,14 @@ pub mod file_tree {
                 let mf = mf.unwrap();
 
                 return FsEntry::FsMusicFile(mf);
+            }
+        }
+
+        pub fn rel_path(&self) -> &PathBuf {
+            match &self {
+                FsEntry::FsFile(f) => return &f.relative_path,
+                FsEntry::FsMusicFile(mf) => return &mf.relative_path,
+                FsEntry::FsDirectory(d) => return &d.relative_path,
             }
         }
     }
@@ -181,10 +189,13 @@ pub mod file_tree {
             let parent = {
                 let parent_opt = Self::find_entry_mut(&mut self.entries, parent_rel_path);
                 if let None = parent_opt {
-                    let parent = entry_rel_path.parent().unwrap_or(Path::new("")).to_path_buf();
+                    let parent = entry_rel_path
+                        .parent()
+                        .unwrap_or(Path::new(""))
+                        .to_path_buf();
                     self.add_entry(&parent);
                     Self::find_entry_mut(&mut self.entries, parent_rel_path)
-                        .expect("Erorr on adding entry")
+                        .expect("Error on adding entry")
                 } else {
                     parent_opt.unwrap()
                 }

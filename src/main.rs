@@ -4,13 +4,16 @@ use iced::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::style::{ActionPanelStyle, ButtonStyle, InfoPanelStyle, PaneStyle, TreePanelStyle};
 use crate::{
     file_tree::file_tree::load_dir_hash_set_files_only, music_file::music_file::MusicFile,
 };
 use crate::{
     file_tree::file_tree::{FileTree, FsEntry, load_dir},
     music_file::music_file::Directory,
+};
+use crate::{
+    music_file::music_file::InvalidFile,
+    style::{ActionPanelStyle, ButtonStyle, InfoPanelStyle, PaneStyle, TreePanelStyle},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -41,6 +44,7 @@ enum Message {
     FixTags(PathBuf),
     RemoveTags(PathBuf),
     MoveFile(PathBuf),
+    DeleteFile(PathBuf),
     KeepSync(PathBuf),
     DropSync(PathBuf),
     StartSync,
@@ -71,8 +75,10 @@ struct DissonanceApp {
     destination_files: Option<HashSet<PathBuf>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Problem {
+    EmptyDirectory,
+    InvalidFile,
     MissingTags,
     MismatchedTags,
     MismatchedPath,
@@ -92,6 +98,7 @@ enum Action {
     MoveFile,
     KeepSync,
     DropSync,
+    DeleteEntry,
     // GetAlbumArt,
     // ApplyCustomTags,
 }
@@ -119,6 +126,7 @@ impl Action {
             Action::RemoveTags => Message::RemoveTags(rel_path),
             Action::KeepSync => Message::KeepSync(rel_path),
             Action::DropSync => Message::DropSync(rel_path),
+            Action::DeleteEntry => Message::DeleteFile(rel_path),
         }
     }
 }
@@ -272,6 +280,10 @@ impl Application for DissonanceApp {
             }
             Message::MoveFile(rel_path) => {
                 self.move_file(rel_path);
+                Command::none()
+            }
+            Message::DeleteFile(rel_path) => {
+                self.delete_entry(rel_path);
                 Command::none()
             }
             Message::KeepSync(rel_path) => {
@@ -609,12 +621,8 @@ impl DissonanceApp {
         let entry = entry.unwrap();
 
         let problems = match entry {
-            FsEntry::FsFile(_) => {
-                vec![]
-            }
-            FsEntry::FsDirectory(_) => {
-                vec![]
-            }
+            FsEntry::FsFile(_) => BTreeSet::<Problem>::new(),
+            FsEntry::FsDirectory(_) => BTreeSet::<Problem>::new(),
             FsEntry::FsMusicFile(mf) => mf.find_problems(),
         };
 
@@ -627,6 +635,23 @@ impl DissonanceApp {
         });
 
         return column;
+    }
+
+    fn get_suitable_actions_for_invalid_file(&self, file: &InvalidFile) -> BTreeSet<Action> {
+        let mut actions = BTreeSet::<Action>::new();
+
+        let problems = file.find_problems();
+
+        for p in problems {
+            match p {
+                Problem::InvalidFile => {
+                    actions.insert(Action::DeleteEntry);
+                }
+                _ => {}
+            }
+        }
+
+        return actions;
     }
 
     fn get_suitable_actions_for_music_file(&self, mf: &MusicFile) -> BTreeSet<Action> {
@@ -647,6 +672,7 @@ impl DissonanceApp {
                         actions.insert(Action::MoveFile);
                         actions.insert(Action::RemoveTags);
                     }
+                    _ => {}
                 }
             }
         } else {
@@ -687,10 +713,9 @@ impl DissonanceApp {
     }
 
     fn get_suitable_actions_for_dir(&self, d: &Directory) -> BTreeSet<Action> {
-        let intention = self.induce_dir_intention(d);
-
         let mut actions = BTreeSet::<Action>::new();
-        match intention {
+
+        match self.induce_dir_intention(d) {
             SyncIntention::KeepSync => {
                 actions.insert(Action::DropSync);
             }
@@ -703,6 +728,23 @@ impl DissonanceApp {
             }
         }
 
+        let problems = d.find_problems_conj();
+        for p in problems {
+            match p {
+                Problem::MissingTags => {
+                    actions.insert(Action::FixTags);
+                }
+                Problem::MismatchedTags | Problem::MismatchedPath => {
+                    actions.insert(Action::FixTags);
+                    actions.insert(Action::MoveFile);
+                    actions.insert(Action::RemoveTags);
+                }
+                Problem::InvalidFile | Problem::EmptyDirectory => {
+                    actions.insert(Action::DeleteEntry);
+                }
+            }
+        }
+
         actions
     }
 
@@ -710,7 +752,7 @@ impl DissonanceApp {
         let actions = match entry {
             FsEntry::FsMusicFile(mf) => self.get_suitable_actions_for_music_file(mf),
             FsEntry::FsDirectory(d) => self.get_suitable_actions_for_dir(d),
-            _ => return BTreeSet::new(),
+            FsEntry::FsFile(f) => self.get_suitable_actions_for_invalid_file(f),
         };
         return actions;
     }
@@ -789,19 +831,30 @@ impl DissonanceApp {
             return;
         }
 
-        let mf_ref = self.file_tree.find(&path);
-        let mf = match mf_ref {
-            Some(FsEntry::FsMusicFile(mf)) => mf,
+        let entry_opt = self.file_tree.find(&path);
+        let entry = match entry_opt {
+            Some(e) => e,
             _ => return,
         };
 
-        let tags = mf.compose_tags_from_path();
-        mf.set_tags(&tags);
+        match entry {
+            FsEntry::FsMusicFile(mf) => {
+                let tags = mf.compose_tags_from_path();
+                mf.set_tags(&tags);
 
-        if !self.file_tree.remove_entry(&path) {
-            println!("Failed to forget file: {}", path.display());
-        }
-        self.file_tree.add_entry(&path);
+                if !self.file_tree.remove_entry(&path) {
+                    println!("Failed to forget file: {}", path.display());
+                }
+                self.file_tree.add_entry(&path);
+            }
+            FsEntry::FsDirectory(d) => {
+                let children: Vec<PathBuf> = d.children.iter().map(|e| e.rel_path().clone()).collect();
+                for child in children {
+                    self.fix_tags(child);
+                }
+            }
+            _ => {}
+        };
     }
 
     fn remove_tags(&mut self, path: PathBuf) {
@@ -824,11 +877,65 @@ impl DissonanceApp {
         self.file_tree.add_entry(&path);
     }
 
+    fn delete_entry(&mut self, rel_path: PathBuf) {
+        let mut abs_path = self.source.clone().unwrap().to_path_buf();
+        abs_path.push(&rel_path);
+
+        // rm -r dir
+        if abs_path.is_dir() {
+            let files = load_dir(self.source.as_ref().unwrap().clone(), rel_path.clone());
+
+            for f in files.iter() {
+                println!("Removing file: {}", f.rel_path().display());
+            }
+
+            files.into_iter().for_each(|f| {
+                let rp = f.rel_path().clone();
+
+                self.file_tree.remove_entry(&rp);
+                self.sync_info.remove_entry(&rp);
+                self.delete_entry(rp);
+            });
+
+            match fs::remove_dir_all(abs_path) {
+                Ok(()) => {}
+                Err(e) => {
+                    println!("Failed to remove directory {}: {}", rel_path.display(), e);
+                }
+            }
+            self.file_tree.remove_entry(&rel_path);
+        } else {
+            // rm file
+            match fs::remove_file(abs_path) {
+                Ok(()) => {
+                    self.file_tree.remove_entry(&rel_path);
+                    self.sync_info.remove_entry(&rel_path);
+                }
+                Err(e) => {
+                    println!("Failed to remove file {}: {}", rel_path.display(), e);
+                }
+            }
+        }
+    }
+
     fn move_file(&mut self, path: PathBuf) {
         let (rel_path, tag_based_rel_path) = {
             let mf_opt = self.file_tree.find(&path);
             let file = match mf_opt {
                 Some(FsEntry::FsMusicFile(mf)) => mf,
+                Some(FsEntry::FsDirectory(d)) => {
+                    let children: Vec<PathBuf> =
+                        d.children.iter().map(|e| e.rel_path().clone()).collect();
+
+                    let dir_path = d.relative_path.clone();
+                    for child in children {
+                        self.move_file(child);
+                    }
+
+                    self.file_tree.remove_entry(&dir_path);
+
+                    return;
+                }
                 _ => return,
             };
 
