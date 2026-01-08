@@ -1,7 +1,7 @@
 pub mod music_file {
     use crate::tags::tags::Tags;
     use crate::{FsEntry, Problem};
-    use audiotags::Tag;
+    use audiotags::{AudioTagEdit, AudioTagWrite, Id3v2Tag, Tag};
     use std::collections::{BTreeSet, HashSet};
     use std::path::PathBuf;
 
@@ -175,7 +175,13 @@ pub mod music_file {
         pub fn set_tags(&self, tags: &Tags) {
             let mut full_path = self.base_path.clone();
             full_path.push(&self.relative_path);
-            let mut tag = Tag::new().read_from_path(&full_path).unwrap();
+
+            let mut tag = Tag::new().read_from_path(&full_path);
+            let mut tag = match tag {
+                Ok(t) => t,
+                Err(_) => Box::new(Id3v2Tag::new()),
+            };
+
             tag.remove_album_artist();
             tag.set_title(&tags.title.as_str());
             tag.set_album_title(&tags.album.as_str());

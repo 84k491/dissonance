@@ -226,7 +226,7 @@ impl Application for DissonanceApp {
             }
 
             Message::RootLoaded(nodes) => {
-                self.file_tree = FileTree::from(nodes);
+                self.file_tree = FileTree::from(nodes, self.source.clone().unwrap());
                 println!("Source dir scanned");
 
                 if self.source.is_none() || self.destination.is_none() {
@@ -372,8 +372,9 @@ impl DissonanceApp {
 
             match mtp_copy(&source_abs_path, &dest_abs_path) {
                 Err(e) => println!(
-                    "ERROR Failed to copy: {} ({})",
+                    "ERROR Failed to copy: {}->{} ({})",
                     source_abs_path.display(),
+                    dest_abs_path.display(),
                     e
                 ),
                 Ok(_) => {
@@ -848,7 +849,8 @@ impl DissonanceApp {
                 self.file_tree.add_entry(&path);
             }
             FsEntry::FsDirectory(d) => {
-                let children: Vec<PathBuf> = d.children.iter().map(|e| e.rel_path().clone()).collect();
+                let children: Vec<PathBuf> =
+                    d.children.iter().map(|e| e.rel_path().clone()).collect();
                 for child in children {
                     self.fix_tags(child);
                 }

@@ -18,6 +18,10 @@ pub mod file_tree {
         pub fn from(root_path: &PathBuf, relative_path: &PathBuf) -> FsEntry {
             let abs_path = root_path.clone().join(&relative_path);
 
+            if !abs_path.exists() {
+                panic!("File does not exist: {}", abs_path.display());
+            }
+
             if abs_path.is_dir() {
                 let children = load_dir(root_path.clone(), relative_path.clone());
                 let d = Directory::new(&root_path, relative_path, children);
@@ -46,12 +50,15 @@ pub mod file_tree {
 
     pub struct FileTree {
         pub entries: Vec<FsEntry>, // TODO don't pub
+
+        root_path: PathBuf,
     }
 
     impl FileTree {
         pub fn empty() -> FileTree {
             FileTree {
                 entries: Vec::<FsEntry>::new(),
+                root_path: PathBuf::new(),
             }
         }
 
@@ -78,8 +85,11 @@ pub mod file_tree {
             Self::flat_entries(&self.entries)
         }
 
-        pub fn from(entries: Vec<FsEntry>) -> FileTree {
-            FileTree { entries: entries }
+        pub fn from(entries: Vec<FsEntry>, root_path: PathBuf) -> FileTree {
+            FileTree {
+                entries: entries,
+                root_path: root_path,
+            }
         }
 
         pub fn find(&self, rel_path: &Path) -> Option<&FsEntry> {
@@ -179,10 +189,11 @@ pub mod file_tree {
 
         pub fn add_entry(&mut self, entry_rel_path: &PathBuf) {
             let parent_rel_path = entry_rel_path.parent().unwrap();
+            println!("Adding entry: {}", entry_rel_path.display());
 
             if parent_rel_path == Path::new("") {
                 self.entries
-                    .push(FsEntry::from(&PathBuf::new(), &entry_rel_path));
+                    .push(FsEntry::from(&self.root_path.clone(), &entry_rel_path));
                 return;
             }
 
@@ -193,6 +204,8 @@ pub mod file_tree {
                         .parent()
                         .unwrap_or(Path::new(""))
                         .to_path_buf();
+
+                    println!("Adding parent: {}", parent.display());
                     self.add_entry(&parent);
                     Self::find_entry_mut(&mut self.entries, parent_rel_path)
                         .expect("Error on adding entry")
