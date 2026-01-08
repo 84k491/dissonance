@@ -121,7 +121,14 @@ pub mod music_file {
             if full_path.exists() == false {
                 panic!("Tags: File does not exist: {}", full_path.display());
             }
-            let tag = Tag::new().read_from_path(&full_path).unwrap();
+            let tag = Tag::new().read_from_path(&full_path);
+            let tag = match tag {
+                Ok(t) => t,
+                Err(err) => {
+                    println!("Tags: Error reading tags of a file: {}: {}", full_path.display(), err);
+                    return Self::empty_tags();
+                }
+            };
             let mut ret = Tags {
                 title: String::new(),
                 album: String::new(),

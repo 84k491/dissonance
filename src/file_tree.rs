@@ -181,7 +181,8 @@ pub mod file_tree {
             let parent = {
                 let parent_opt = Self::find_entry_mut(&mut self.entries, parent_rel_path);
                 if let None = parent_opt {
-                    self.add_entry(entry_rel_path);
+                    let parent = entry_rel_path.parent().unwrap_or(Path::new("")).to_path_buf();
+                    self.add_entry(&parent);
                     Self::find_entry_mut(&mut self.entries, parent_rel_path)
                         .expect("Erorr on adding entry")
                 } else {

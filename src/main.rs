@@ -856,6 +856,19 @@ impl DissonanceApp {
             println!("Failed to forget file: {}", rel_path.to_string_lossy());
         }
 
+        let se = self.sync_info.get(&rel_path);
+        if se.is_some() {
+            let se = se.unwrap();
+            self.sync_info
+                .insert(tag_based_rel_path.clone(), se.clone());
+            self.sync_info.remove_entry(&rel_path);
+        } else {
+            println!(
+                "ERROR Failed to find sync entry: {}",
+                rel_path.to_string_lossy()
+            );
+        }
+
         self.selected = Some(tag_based_rel_path);
 
         let _ = remove_empty_subdirs::remove_empty_subdirs(&self.source.clone().unwrap());
