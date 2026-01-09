@@ -113,7 +113,6 @@ enum SyncIntention {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct SyncedEntry {
-    rel_path: PathBuf,
     intention: SyncIntention,
     synced: bool,
 }
@@ -326,17 +325,17 @@ impl DissonanceApp {
     fn sync_with_destination(&mut self) {
         println!("Syncing with destination");
 
-        let unsynced = self
+        let unsynced: BTreeMap<PathBuf, SyncedEntry> = self
             .sync_info
             .iter()
             .filter(|(_, e)| !e.synced)
-            .map(|(_, v)| v.clone())
-            .collect::<Vec<SyncedEntry>>();
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         let to_remove_from_dest = unsynced
             .iter()
-            .filter(|k| k.intention == SyncIntention::DropSync)
-            .map(|k| k.rel_path.clone())
+            .filter(|(_, v)| v.intention == SyncIntention::DropSync)
+            .map(|(k, _)| k.clone())
             .collect::<Vec<PathBuf>>();
 
         to_remove_from_dest.iter().for_each(|k| {
@@ -353,8 +352,8 @@ impl DissonanceApp {
 
         let to_copy_to_dest = unsynced
             .iter()
-            .filter(|k| k.intention == SyncIntention::KeepSync)
-            .map(|k| k.rel_path.clone())
+            .filter(|(_, v)| v.intention == SyncIntention::KeepSync)
+            .map(|(k, _)| k.clone())
             .collect::<Vec<PathBuf>>();
 
         to_copy_to_dest.iter().for_each(|k| {
@@ -372,7 +371,7 @@ impl DissonanceApp {
 
             match mtp_copy(&source_abs_path, &dest_abs_path) {
                 Err(e) => println!(
-                    "ERROR Failed to copy: {}->{} ({})",
+                    "ERROR Failed to copy: {} -> {} ({})",
                     source_abs_path.display(),
                     dest_abs_path.display(),
                     e
@@ -430,8 +429,9 @@ impl DissonanceApp {
                 }
             }
             FsEntry::FsMusicFile(mf) => {
+                let rel_path = mf.relative_path.clone();
                 self.sync_info
-                    .entry(mf.relative_path.clone()) // creates new
+                    .entry(rel_path.clone()) // creates new
                     .and_modify(|e| {
                         e.intention = intention.clone();
                         if self.destination_files.is_none() {
@@ -441,7 +441,7 @@ impl DissonanceApp {
                         }
                         let dfiles = self.destination_files.as_ref().unwrap();
 
-                        let dest_file = dfiles.get(&e.rel_path);
+                        let dest_file = dfiles.get(&rel_path);
                         match dest_file {
                             Some(_) => {
                                 e.synced = e.intention == SyncIntention::KeepSync;
@@ -498,7 +498,6 @@ impl DissonanceApp {
                 (
                     k.clone(),
                     SyncedEntry {
-                        rel_path: k.clone(),
                         intention: SyncIntention::Unspecified,
                         synced: false,
                     },
@@ -518,7 +517,6 @@ impl DissonanceApp {
                 (
                     k.clone(),
                     SyncedEntry {
-                        rel_path: k.clone(),
                         intention: SyncIntention::DropSync,
                         synced: false,
                     },
@@ -1161,7 +1159,13 @@ fn save_state(source: Option<PathBuf>, destination: Option<PathBuf>) {
 
 fn mtp_copy(src: &PathBuf, dst: &PathBuf) -> io::Result<u64> {
     let mut input = File::open(src)?;
-    let mut output = File::create(dst)?;
+    let mut output = match File::create(dst) {
+        Err(e) => {
+            println!("Failed to create output file: {}", e);
+            return Err(e);
+        }
+        Ok(f) => f,
+    };
 
     let mut buf = [0u8; 64 * 1024];
     let mut total = 0;
