@@ -1,6 +1,6 @@
 pub mod tags {
 
-    use std::collections::HashSet;
+    pub static INVALID_CHARS: &[&str] = &["<", ">", ":", "\"", "\\", "|", "?", "*"]; // '/'
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Tags {
@@ -24,20 +24,11 @@ pub mod tags {
             self.title = self.title.replace("\0", "");
         }
         pub fn remove_invalid_symbols(&mut self) {
-            let invalid_symbols = HashSet::from(["<", ">", ":", "\"", "/", "\\", "|", "?", "*"]);
-            invalid_symbols.iter().for_each(|sym| {
+            INVALID_CHARS.iter().for_each(|sym| {
                 self.artist = self.artist.replace(sym, "");
                 self.album_artist = self.album_artist.replace(sym, "");
                 self.title = self.title.replace(sym, "");
             });
-        }
-
-        pub fn fix_track_number(&mut self) {
-            self.track_number = self
-                .track_number
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
         }
     }
 }

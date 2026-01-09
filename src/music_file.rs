@@ -1,7 +1,7 @@
 pub mod music_file {
     use crate::tags::tags::Tags;
     use crate::{FsEntry, Problem};
-    use audiotags::{AudioTagEdit, AudioTagWrite, Id3v2Tag, Tag};
+    use audiotags::{Id3v2Tag, Tag};
     use std::collections::{BTreeSet, HashSet};
     use std::path::PathBuf;
 
@@ -176,7 +176,7 @@ pub mod music_file {
             let mut full_path = self.base_path.clone();
             full_path.push(&self.relative_path);
 
-            let mut tag = Tag::new().read_from_path(&full_path);
+            let tag = Tag::new().read_from_path(&full_path);
             let mut tag = match tag {
                 Ok(t) => t,
                 Err(_) => Box::new(Id3v2Tag::new()),
@@ -232,6 +232,10 @@ pub mod music_file {
                 ret.insert(Problem::MismatchedPath);
             }
 
+            if has_invalid_chars_in_path(&self.relative_path) {
+                ret.insert(Problem::InvalidCharacters);
+            }
+
             return ret;
         }
     }
@@ -261,6 +265,7 @@ pub mod music_file {
                         return true;
                     }
                     FsEntry::FsDirectory(d) => {
+                        // TODO merge those criterias
                         if d.has_problems() {
                             return true;
                         }
@@ -304,5 +309,13 @@ pub mod music_file {
 
             return ret;
         }
+    }
+
+    fn has_invalid_chars_in_path(rel_path: &PathBuf) -> bool {
+        let str = rel_path.to_string_lossy().into_owned();
+
+        crate::tags::tags::INVALID_CHARS
+            .iter()
+            .any(|c| str.contains(*c))
     }
 }

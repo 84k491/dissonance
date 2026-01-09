@@ -45,6 +45,7 @@ enum Message {
     RemoveTags(PathBuf),
     MoveFile(PathBuf),
     DeleteFile(PathBuf),
+    FixCharacters(PathBuf),
     KeepSync(PathBuf),
     DropSync(PathBuf),
     StartSync,
@@ -77,6 +78,7 @@ struct DissonanceApp {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Problem {
+    InvalidCharacters,
     EmptyDirectory,
     InvalidFile,
     MissingTags,
@@ -95,6 +97,7 @@ impl Display for Problem {
 enum Action {
     RemoveTags,
     FixTags,
+    FixCharacters,
     MoveFile,
     KeepSync,
     DropSync,
@@ -126,6 +129,7 @@ impl Action {
             Action::KeepSync => Message::KeepSync(rel_path),
             Action::DropSync => Message::DropSync(rel_path),
             Action::DeleteEntry => Message::DeleteFile(rel_path),
+            Action::FixCharacters => Message::FixCharacters(rel_path),
         }
     }
 }
@@ -278,7 +282,7 @@ impl Application for DissonanceApp {
                 Command::none()
             }
             Message::MoveFile(rel_path) => {
-                self.move_file(rel_path);
+                self.move_file_to_tag_based_path(rel_path);
                 Command::none()
             }
             Message::DeleteFile(rel_path) => {
@@ -295,6 +299,10 @@ impl Application for DissonanceApp {
             }
             Message::StartSync => {
                 self.sync_with_destination();
+                Command::none()
+            }
+            Message::FixCharacters(rel_path) => {
+                self.fix_characters(&rel_path);
                 Command::none()
             }
         }
@@ -741,6 +749,9 @@ impl DissonanceApp {
                 Problem::InvalidFile | Problem::EmptyDirectory => {
                     actions.insert(Action::DeleteEntry);
                 }
+                Problem::InvalidCharacters => {
+                    actions.insert(Action::FixCharacters);
+                }
             }
         }
 
@@ -918,7 +929,7 @@ impl DissonanceApp {
         }
     }
 
-    fn move_file(&mut self, path: PathBuf) {
+    fn move_file_to_tag_based_path(&mut self, path: PathBuf) {
         let (rel_path, tag_based_rel_path) = {
             let mf_opt = self.file_tree.find(&path);
             let file = match mf_opt {
@@ -929,7 +940,7 @@ impl DissonanceApp {
 
                     let dir_path = d.relative_path.clone();
                     for child in children {
-                        self.move_file(child);
+                        self.move_file_to_tag_based_path(child);
                     }
 
                     self.file_tree.remove_entry(&dir_path);
@@ -945,11 +956,17 @@ impl DissonanceApp {
             )
         };
 
+        self.move_file(rel_path, tag_based_rel_path.clone());
+
+        self.selected = Some(tag_based_rel_path);
+    }
+
+    fn move_file(&mut self, from: PathBuf, to: PathBuf) {
         let mut source_full_path = self.source.clone().unwrap().to_path_buf();
-        source_full_path.push(&rel_path);
+        source_full_path.push(&from);
 
         let mut target_full_path = self.source.clone().unwrap().to_path_buf();
-        target_full_path.push(tag_based_rel_path.clone());
+        target_full_path.push(&to);
 
         let _ = fs::create_dir_all(target_full_path.parent().unwrap());
         let move_res = fs::rename(&source_full_path, &target_full_path);
@@ -958,25 +975,22 @@ impl DissonanceApp {
             return;
         }
 
-        self.file_tree.add_entry(&tag_based_rel_path);
-        if !self.file_tree.remove_entry(&rel_path) {
-            println!("Failed to forget file: {}", rel_path.to_string_lossy());
+        self.file_tree.add_entry(&to);
+        if !self.file_tree.remove_entry(&from) {
+            println!("Failed to forget file: {}", from.to_string_lossy());
         }
 
-        let se = self.sync_info.get(&rel_path);
+        let se = self.sync_info.get(&from);
         if se.is_some() {
             let se = se.unwrap();
-            self.sync_info
-                .insert(tag_based_rel_path.clone(), se.clone());
-            self.sync_info.remove_entry(&rel_path);
+            self.sync_info.insert(to.clone(), se.clone());
+            self.sync_info.remove_entry(&from);
         } else {
             println!(
                 "ERROR Failed to find sync entry: {}",
-                rel_path.to_string_lossy()
+                from.to_string_lossy()
             );
         }
-
-        self.selected = Some(tag_based_rel_path);
 
         let _ = remove_empty_subdirs::remove_empty_subdirs(&self.source.clone().unwrap());
     }
@@ -1094,6 +1108,41 @@ impl DissonanceApp {
         }
 
         col
+    }
+
+    fn fix_characters(&mut self, old_path: &PathBuf) {
+        let entry_opt = self.file_tree.find(&old_path);
+        let entry = match entry_opt {
+            Some(e) => e.clone(), // only need to read entry and remove it
+            _ => return,
+        };
+
+        match entry {
+            FsEntry::FsMusicFile(mf) => {
+                let mut new_path_str = mf.relative_path.to_string_lossy().to_string();
+                crate::tags::tags::INVALID_CHARS.iter().for_each(|c| {
+                    new_path_str = new_path_str.replace(c, "_");
+                });
+
+                let new_path = PathBuf::from(new_path_str);
+
+                self.move_file(old_path.clone(), new_path.clone());
+            }
+            FsEntry::FsDirectory(d) => {
+                {
+                    let children: Vec<PathBuf> =
+                        d.children.iter().map(|e| e.rel_path().clone()).collect();
+
+                    for child in children {
+                        self.fix_characters(&child);
+                    }
+                }
+                self.file_tree.remove_entry(&d.relative_path.clone());
+
+                let _ = remove_empty_subdirs::remove_empty_subdirs(&self.source.clone().unwrap());
+            }
+            _ => {}
+        }
     }
 }
 

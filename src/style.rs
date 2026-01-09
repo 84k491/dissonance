@@ -1,5 +1,5 @@
 use iced::{
-    Background, Color, Theme, color,
+    Background, Color, Theme,
     widget::{button, container},
 };
 
