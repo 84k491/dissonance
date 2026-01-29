@@ -1,6 +1,6 @@
 pub mod file_tree {
 
-    use crate::music_file::music_file::{Directory, InvalidFile, MusicFile};
+    use crate::music_file::{Directory, InvalidFile, MusicFile};
     use pathdiff::diff_paths;
     use std::{
         collections::HashSet,

@@ -5,14 +5,15 @@ use iced::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    file_tree::file_tree::load_dir_hash_set_files_only, music_file::music_file::MusicFile,
+    file_tree::file_tree::load_dir_hash_set_files_only, music_file::MusicFile,
 };
 use crate::{
     file_tree::file_tree::{FileTree, FsEntry, load_dir},
-    music_file::music_file::Directory,
+    music_file::Directory,
+    music_file::FsEntryTrait,
 };
 use crate::{
-    music_file::music_file::InvalidFile,
+    music_file::InvalidFile,
     style::{ActionPanelStyle, ButtonStyle, InfoPanelStyle, PaneStyle, TreePanelStyle},
 };
 use std::{
@@ -735,7 +736,7 @@ impl DissonanceApp {
             }
         }
 
-        let problems = d.find_problems_conj();
+        let problems = d.find_problems();
         for p in problems {
             match p {
                 Problem::MissingTags => {
