@@ -1,5 +1,5 @@
 use crate::tags::tags::Tags;
-use crate::{FsEntry, Problem};
+use crate::{FsEntry, Problem, SyncIntention, SyncedEntry};
 use audiotags::{Id3v2Tag, Tag};
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
@@ -7,34 +7,22 @@ use std::path::PathBuf;
 pub trait FsEntryTrait {
     fn find_problems(&self) -> BTreeSet<Problem>;
     fn has_problems(&self) -> bool;
+    fn set_sync_info(&mut self, intention: SyncedEntry);
+    fn sync_info(&self) -> SyncedEntry;
 }
 
 #[derive(Debug, Clone)]
 pub struct InvalidFile {
-    pub base_path: PathBuf,
+    // pub base_path: PathBuf,
     pub relative_path: PathBuf,
 }
 impl InvalidFile {
-    pub fn new(base: &PathBuf, relative: &PathBuf) -> InvalidFile {
+    pub fn from(_base: &PathBuf, relative: &PathBuf) -> InvalidFile {
         let ret = InvalidFile {
-            base_path: base.clone(),
+            // base_path: base.clone(),
             relative_path: relative.clone(),
         };
         ret
-    }
-
-    pub fn is_music_file(&self) -> bool {
-        let music_file_extensions = HashSet::from(["mp3", "wav", "flac"]);
-
-        let ext = match self.relative_path.extension() {
-            None => return false,
-            Some(e) => e,
-        }
-        .to_string_lossy()
-        .into_owned()
-        .to_lowercase();
-
-        return music_file_extensions.contains(ext.as_str());
     }
 }
 
@@ -45,6 +33,29 @@ impl FsEntryTrait for InvalidFile {
     fn has_problems(&self) -> bool {
         return true;
     }
+    fn sync_info(&self) -> SyncedEntry {
+        return SyncedEntry {
+            intention: SyncIntention::DropSync,
+            synced: false,
+        };
+    }
+    fn set_sync_info(&mut self, _: SyncedEntry) {
+        // do nothing
+    }
+}
+
+fn is_music_file(relative: &PathBuf) -> bool {
+    let music_file_extensions = HashSet::from(["mp3", "wav", "flac"]);
+
+    let ext = match relative.extension() {
+        None => return false,
+        Some(e) => e,
+    }
+    .to_string_lossy()
+    .into_owned()
+    .to_lowercase();
+
+    music_file_extensions.contains(ext.as_str())
 }
 
 #[derive(Debug, Clone)]
@@ -52,22 +63,29 @@ pub struct MusicFile {
     pub base_path: PathBuf,
     pub relative_path: PathBuf,
 
+    pub sync_data: SyncedEntry,
+
     has_problems: bool,
 }
 impl MusicFile {
-    pub fn from(simple_file: InvalidFile) -> Option<MusicFile> {
-        // TODO use path as arg
-        if !simple_file.is_music_file() {
+    pub fn from(base: &PathBuf, relative: &PathBuf, intention: SyncIntention) -> Option<MusicFile> {
+        if !is_music_file(relative) {
             return None;
         }
 
         let mut ret = MusicFile {
-            base_path: simple_file.base_path.clone(),
-            relative_path: simple_file.relative_path.clone(),
+            base_path: base.clone(),
+            relative_path: relative.clone(),
+            sync_data: SyncedEntry {
+                intention: intention,
+                synced: false,
+            },
             has_problems: true,
         };
+
         let problems = ret.find_problems();
         ret.has_problems = !problems.is_empty();
+
         Some(ret)
     }
 
@@ -218,6 +236,10 @@ impl MusicFile {
 }
 
 impl FsEntryTrait for MusicFile {
+    fn set_sync_info(&mut self, s_data: SyncedEntry) {
+        self.sync_data = s_data;
+    }
+
     fn has_problems(&self) -> bool {
         return self.has_problems;
     }
@@ -249,6 +271,10 @@ impl FsEntryTrait for MusicFile {
 
         return ret;
     }
+
+    fn sync_info(&self) -> SyncedEntry {
+        return self.sync_data.clone();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -268,9 +294,55 @@ impl Directory {
         };
         ret
     }
+
+    pub fn intention(&self) -> SyncIntention {
+        self.children
+            .iter()
+            .map(|c| match c {
+                FsEntry::FsFile(_) => SyncIntention::DropSync,
+                FsEntry::FsMusicFile(mf) => mf.sync_data.intention.clone(),
+                FsEntry::FsDirectory(d) => d.sync_info().intention,
+            })
+            .reduce(|acc, v| match (acc, v) {
+                (SyncIntention::Unspecified, _) => SyncIntention::Unspecified,
+                (_, SyncIntention::Unspecified) => SyncIntention::Unspecified,
+
+                (SyncIntention::KeepSync, SyncIntention::KeepSync) => SyncIntention::KeepSync,
+                (SyncIntention::KeepSync, SyncIntention::DropSync) => SyncIntention::MixedDir,
+                (SyncIntention::KeepSync, SyncIntention::MixedDir) => SyncIntention::MixedDir,
+
+                (SyncIntention::DropSync, SyncIntention::KeepSync) => SyncIntention::MixedDir,
+                (SyncIntention::DropSync, SyncIntention::DropSync) => SyncIntention::DropSync,
+                (SyncIntention::DropSync, SyncIntention::MixedDir) => SyncIntention::MixedDir,
+
+                (SyncIntention::MixedDir, _) => SyncIntention::MixedDir,
+            })
+            .unwrap_or(SyncIntention::Unspecified)
+    }
+
+    pub fn synced(&self) -> bool {
+        self.children
+            .iter()
+            .map(|c| match c {
+                FsEntry::FsFile(_) => false,
+                FsEntry::FsMusicFile(mf) => mf.sync_data.synced,
+                FsEntry::FsDirectory(d) => d.sync_info().synced,
+            })
+            .all(|v| v)
+    }
 }
 
 impl FsEntryTrait for Directory {
+    fn set_sync_info(&mut self, s_data: SyncedEntry) {
+        for child in &mut self.children {
+            match child {
+                FsEntry::FsFile(f) => f.set_sync_info(s_data.clone()),
+                FsEntry::FsDirectory(d) => d.set_sync_info(s_data.clone()),
+                FsEntry::FsMusicFile(mf) => mf.set_sync_info(s_data.clone()),
+            }
+        }
+    }
+
     fn has_problems(&self) -> bool {
         for child in &self.children {
             match child {
@@ -321,6 +393,13 @@ impl FsEntryTrait for Directory {
         }
 
         return ret;
+    }
+
+    fn sync_info(&self) -> SyncedEntry {
+        let intention = self.intention();
+        let synced = self.synced();
+
+        return SyncedEntry { intention, synced };
     }
 }
 fn has_invalid_chars_in_path(rel_path: &PathBuf) -> bool {
