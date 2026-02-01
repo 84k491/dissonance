@@ -68,12 +68,20 @@ impl FileTree {
     }
 
     pub fn create_index(&self) -> BTreeMap<PathBuf, SyncedEntry> {
+        return Self::do_create_index(&self.entries);
+    }
+
+    fn do_create_index(entries: &Vec<FsEntry>) -> BTreeMap<PathBuf, SyncedEntry> {
         let mut map = BTreeMap::<PathBuf, SyncedEntry>::new();
 
-        for entry in self.entries.iter() {
+        for entry in entries.iter() {
             match entry {
                 FsEntry::FsMusicFile(mf) => {
                     map.insert(mf.relative_path.clone(), mf.sync_data.clone());
+                }
+                FsEntry::FsDirectory(d) => {
+                    let sub_index = Self::do_create_index(&d.children);
+                    map.extend(sub_index);
                 }
                 _ => {}
             }
@@ -238,7 +246,6 @@ impl FileTree {
 
     pub fn add_entry(&mut self, entry_rel_path: &PathBuf, sync_info: SyncedEntry) {
         let parent_rel_path = entry_rel_path.parent().unwrap();
-        println!("Adding entry: {}", entry_rel_path.display());
 
         if parent_rel_path == Path::new("") {
             self.entries
@@ -254,7 +261,6 @@ impl FileTree {
                     .unwrap_or(Path::new(""))
                     .to_path_buf();
 
-                println!("Adding parent: {}", parent.display());
                 self.add_entry(&parent, sync_info.clone());
                 Self::find_entry_mut(&mut self.entries, parent_rel_path)
                     .expect("Error on adding entry")

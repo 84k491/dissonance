@@ -337,8 +337,12 @@ impl DissonanceApp {
             .map(|(k, _)| k.clone())
             .collect::<Vec<PathBuf>>();
 
+        println!("To remove {} files", to_remove_from_dest.len());
+
         to_remove_from_dest.iter().for_each(|k| {
             let abs_path = self.destination.clone().unwrap().join(k);
+
+            println!("Removing: {}", abs_path.display());
             std::fs::remove_file(&abs_path).unwrap();
 
             let dfiles = self.destination_files.as_mut().unwrap();
@@ -351,8 +355,6 @@ impl DissonanceApp {
                     synced: true,
                 },
             );
-
-            println!("Removed: {}", abs_path.display());
         });
 
         let to_copy_to_dest = unsynced
@@ -424,19 +426,30 @@ impl DissonanceApp {
 
     fn set_sync_intention(&mut self, rel_path: PathBuf, intention: SyncIntention) {
         let e = self.file_tree.find(&rel_path);
-        let synced = match e {
-            Some(FsEntry::FsMusicFile(mf)) => mf.sync_data.synced,
-            Some(FsEntry::FsDirectory(d)) => d.synced(),
-            _ => false,
+        match e {
+            Some(FsEntry::FsMusicFile(_)) => {}
+            Some(FsEntry::FsDirectory(d)) => {
+                let ch = d.children_recursive();
+                for c in ch {
+                    self.set_sync_intention(c.clone(), intention.clone());
+                }
+                return;
+            }
+            _ => return,
+        }
+
+        let dest_available = self.destination.is_some();
+        let is_in_dest = self.destination_files.as_ref().unwrap().contains(&rel_path);
+
+        let synced = match intention {
+            SyncIntention::KeepSync => dest_available && is_in_dest,
+            SyncIntention::DropSync => dest_available && !is_in_dest,
+            SyncIntention::Unspecified => false,
+            SyncIntention::MixedDir => false,
         };
 
-        self.file_tree.set_sync_info(
-            &rel_path,
-            SyncedEntry {
-                intention,
-                synced: synced,
-            },
-        );
+        self.file_tree
+            .set_sync_info(&rel_path, SyncedEntry { intention, synced });
     }
 
     fn save_index(index: BTreeMap<PathBuf, SyncedEntry>) {
@@ -463,6 +476,7 @@ impl DissonanceApp {
     }
 
     fn update_index_destination(&mut self, dest_entries: &HashSet<PathBuf>) {
+        // TODO
         // add to index (with {drop, unsync}) those entries that are in dest, but not in index // they will be removed from index on next local scan
         // let to_add_to_index: BTreeMap<PathBuf, SyncedEntry> = dest_entries
         //     .iter()

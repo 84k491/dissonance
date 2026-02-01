@@ -295,6 +295,24 @@ impl Directory {
         ret
     }
 
+    pub fn children_recursive(&self) -> Vec<PathBuf> {
+        let mut ret = Vec::<PathBuf>::new();
+
+        for child in &self.children {
+            match child {
+                FsEntry::FsDirectory(d) => {
+                    ret.extend(d.children_recursive());
+                }
+                FsEntry::FsMusicFile(mf) => {
+                    ret.push(mf.relative_path.clone());
+                }
+                _ => {}
+            }
+        }
+
+        return ret;
+    }
+
     pub fn intention(&self) -> SyncIntention {
         self.children
             .iter()
