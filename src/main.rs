@@ -337,7 +337,7 @@ impl DissonanceApp {
             .map(|(k, _)| k.clone())
             .collect::<Vec<PathBuf>>();
 
-        println!("To remove {} files", to_remove_from_dest.len());
+        println!("Drop sync for {} files", to_remove_from_dest.len());
 
         to_remove_from_dest.iter().for_each(|k| {
             let abs_path = self.destination.clone().unwrap().join(k);
@@ -355,6 +355,27 @@ impl DissonanceApp {
                     synced: true,
                 },
             );
+        });
+
+        // remove those entries that are in dest, but not in index
+        let destination_extra = self
+            .destination_files
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|path| self.file_tree.find(path).is_none())
+            .map(|k| k.clone())
+            .collect::<Vec<PathBuf>>();
+
+        destination_extra.iter().for_each(|k| {
+            let abs_path = self.destination.clone().unwrap().join(k);
+
+            println!("Removing: {}", abs_path.display());
+            std::fs::remove_file(&abs_path).unwrap();
+
+            let dfiles = self.destination_files.as_mut().unwrap();
+            let p = k.clone();
+            dfiles.remove(&p);
         });
 
         let to_copy_to_dest = unsynced
@@ -476,23 +497,6 @@ impl DissonanceApp {
     }
 
     fn update_index_destination(&mut self, dest_entries: &HashSet<PathBuf>) {
-        // TODO
-        // add to index (with {drop, unsync}) those entries that are in dest, but not in index // they will be removed from index on next local scan
-        // let to_add_to_index: BTreeMap<PathBuf, SyncedEntry> = dest_entries
-        //     .iter()
-        //     .filter(|k| !self.sync_info.contains_key(*k))
-        //     .map(|k| {
-        //         (
-        //             k.clone(),
-        //             SyncedEntry {
-        //                 intention: SyncIntention::DropSync,
-        //                 synced: false,
-        //             },
-        //         )
-        //     })
-        //     .collect();
-        // self.sync_info.extend(to_add_to_index);
-
         // update existing entries
         // TODO don't create index?
         let sync_info = self.file_tree.create_index();

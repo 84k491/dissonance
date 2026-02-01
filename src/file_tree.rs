@@ -137,7 +137,7 @@ impl FileTree {
     }
 
     pub fn set_sync_info(&mut self, rel_path: &PathBuf, sync_entry: SyncedEntry) {
-        let e: &mut FsEntry = Self::find_entry_mut(&mut self.entries, rel_path).unwrap();
+        let e: &mut FsEntry = Self::find_entry_mut(&mut self.entries, rel_path).expect("No entry on set sync info");
         match e {
             FsEntry::FsMusicFile(mf) => {
                 mf.set_sync_info(sync_entry);
