@@ -1,5 +1,7 @@
+use futures::SinkExt;
 use iced::{
-    Application, Command, Element, Length, Settings, Theme, alignment, executor,
+    Application, Command, Element, Length, Settings, Subscription, Theme, alignment, executor,
+    futures, subscription,
     widget::{Column, TextInput, button, column, container, row, scrollable, text},
 };
 use serde::{Deserialize, Serialize};
@@ -37,18 +39,25 @@ enum Message {
     SourceSubmited,
     DestinationUpdated(String),
     DestinationSubmited,
+
     RootLoaded(HashSet<PathBuf>),
+
     ToggleDir(PathBuf),
     SelectFile(PathBuf),
+
     FixTags(PathBuf),
     RemoveTags(PathBuf),
     MoveFile(PathBuf),
     DeleteFile(PathBuf),
     FixCharacters(PathBuf),
+
     KeepSync(PathBuf),
     DropSync(PathBuf),
+
     StartSync,
     StartIndexing,
+
+    FilesystemActionDone((FilesystemAction, bool)),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -57,7 +66,7 @@ struct AppSavedState {
     destination: Option<PathBuf>,
 }
 
-static CONFIG_ABS_PATH: &'static str = "/home/bakar/.config/dissonance";
+static CONFIG_ABS_PATH: &'static str = "/home/bakar/.config/dissonance"; // TODO
 static STATE_FILENAME: &'static str = "saved_state.json";
 static INDEX_FILENAME: &'static str = "index.json";
 
@@ -72,6 +81,8 @@ struct DissonanceApp {
     destination: Option<PathBuf>,
 
     destination_files: Option<HashSet<PathBuf>>,
+
+    filesystem_actions: Vec<FilesystemAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -102,6 +113,27 @@ enum Action {
     DeleteEntry,
     // GetAlbumArt,
     // ApplyCustomTags,
+    // ReinstallTags
+    // ConvertToMp3
+}
+
+#[derive(Debug, Clone)]
+struct CopyFileAction {
+    from_base_abs: PathBuf,
+    to_base_abs: PathBuf,
+    relative: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct RemoveFileAction {
+    base_abs: PathBuf,
+    relative: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+enum FilesystemAction {
+    Copy(CopyFileAction),
+    Remove(RemoveFileAction),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -146,11 +178,116 @@ impl Drop for DissonanceApp {
     }
 }
 
+fn process_filesystem_action(file: &FilesystemAction) -> (FilesystemAction, bool) {
+    match file {
+        FilesystemAction::Copy(copy_action) => {
+            let from_abs = copy_action.from_base_abs.join(&copy_action.relative);
+            let to_abs = copy_action.to_base_abs.join(&copy_action.relative);
+            match fs::create_dir_all(to_abs.parent().expect("No parent on mkdir")) {
+                Err(e) => println!("ERROR Failed to create dir: {} ({})", to_abs.display(), e),
+                Ok(_) => {}
+            }
+            println!("Copying: {} to {}", from_abs.display(), to_abs.display());
+
+            let res = mtp_copy(&from_abs, &to_abs);
+
+            let ok = match res {
+                Err(_) => false,
+                Ok(_) => true,
+            };
+
+            (FilesystemAction::Copy(copy_action.clone()), ok)
+        }
+        FilesystemAction::Remove(remove_action) => {
+            let from_abs = remove_action.base_abs.join(&remove_action.relative);
+            println!("Removing: {}", from_abs.display());
+            std::fs::remove_file(&from_abs).unwrap();
+
+            (FilesystemAction::Remove(remove_action.clone()), true)
+        }
+    }
+}
+
 impl Application for DissonanceApp {
     type Executor = executor::Default;
     type Message = Message;
     type Theme = Theme;
     type Flags = ();
+
+    fn subscription(&self) -> Subscription<Message> {
+        let mut files = self.filesystem_actions.clone();
+
+        if files.is_empty() {
+            return Subscription::none();
+        }
+
+        return subscription::channel(
+            std::any::TypeId::of::<()>(),
+            100,
+            move |mut output| async move {
+                loop {
+                    // if files.is_empty() {
+                    //     time::sleep(std::time::Duration::from_secs(1)).await;
+                    //     continue;
+                    // }
+
+                    for file in files.iter() {
+                        match file {
+                            FilesystemAction::Copy(copy_action) => {
+                                let from_abs = copy_action.from_base_abs.join(&copy_action.relative);
+                                let to_abs = copy_action.to_base_abs.join(&copy_action.relative);
+                                match fs::create_dir_all(
+                                    to_abs.parent().expect("No parent on mkdir"),
+                                ) {
+                                    Err(e) => println!(
+                                        "ERROR Failed to create dir: {} ({})",
+                                        to_abs.display(),
+                                        e
+                                    ),
+                                    Ok(_) => {}
+                                }
+                                println!(
+                                    "Copying: {} to {}",
+                                    from_abs.display(),
+                                    to_abs.display()
+                                );
+
+                                let res = mtp_copy(&from_abs, &to_abs);
+
+                                let ok = match res {
+                                    Err(_) => false,
+                                    Ok(_) => true,
+                                };
+
+                                let _ = output
+                                    .send(Message::FilesystemActionDone((
+                                        FilesystemAction::Copy(copy_action.clone()),
+                                        ok,
+                                    )))
+                                    .await;
+                            }
+                            FilesystemAction::Remove(remove_action) => {
+                                let from_abs = remove_action.base_abs.join(&remove_action.relative);
+                                println!("Removing: {}", from_abs.display());
+                                std::fs::remove_file(&from_abs).unwrap();
+
+                                let _ = output
+                                    .send(Message::FilesystemActionDone((
+                                        FilesystemAction::Remove(remove_action.clone()),
+                                        true,
+                                    )))
+                                    .await;
+                            }
+                        }
+                    }
+                    files.clear();
+                    println!("Async end");
+
+                    // end
+                }
+            },
+        );
+    }
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let saved_state = load_saved_state();
@@ -175,6 +312,7 @@ impl Application for DissonanceApp {
                 source: saved_state.source.clone(),
                 destination: saved_state.destination.clone(),
                 destination_files: None,
+                filesystem_actions: Vec::new(),
             },
             Command::none(),
         )
@@ -296,6 +434,43 @@ impl Application for DissonanceApp {
                 self.fix_characters(&rel_path);
                 Command::none()
             }
+
+            Message::FilesystemActionDone((action, success)) => {
+                if !success {
+                    println!("Filesystem action failed: {:?}", action);
+                    return Command::none();
+                }
+
+                match action {
+                    FilesystemAction::Copy(copy_action) => {
+                        let dfiles = self.destination_files.as_mut().unwrap();
+                        dfiles.insert(copy_action.relative.clone());
+                        self.file_tree.set_sync_info(
+                            &copy_action.relative,
+                            SyncedEntry {
+                                intention: SyncIntention::KeepSync,
+                                synced: true,
+                            },
+                        );
+                    }
+                    FilesystemAction::Remove(remove_action) => {
+                        let dfiles = self.destination_files.as_mut().unwrap();
+                        let p = remove_action.relative.clone();
+                        dfiles.remove(&p);
+
+                        // does nothing if absent
+                        self.file_tree.set_sync_info(
+                            &remove_action.relative,
+                            SyncedEntry {
+                                intention: SyncIntention::DropSync,
+                                synced: true,
+                            },
+                        );
+                    }
+                }
+
+                Command::none()
+            }
         }
     }
 
@@ -325,6 +500,9 @@ impl DissonanceApp {
         println!("Syncing with destination");
 
         let index = self.file_tree.create_index();
+
+        let mut filesystem_actions: Vec<FilesystemAction> = Vec::<FilesystemAction>::new();
+
         let unsynced: BTreeMap<PathBuf, SyncedEntry> = index
             .iter()
             .filter(|(_, e)| !e.synced)
@@ -334,28 +512,34 @@ impl DissonanceApp {
         let to_remove_from_dest = unsynced
             .iter()
             .filter(|(_, v)| v.intention == SyncIntention::DropSync)
-            .map(|(k, _)| k.clone())
-            .collect::<Vec<PathBuf>>();
+            .map(|(k, _)| {
+                FilesystemAction::Remove(RemoveFileAction {
+                    base_abs : self.destination.clone().unwrap(),
+                    relative : k.clone(),
+                })
+            })
+            .collect::<Vec<FilesystemAction>>();
 
         println!("Drop sync for {} files", to_remove_from_dest.len());
+        filesystem_actions.extend(to_remove_from_dest);
 
-        to_remove_from_dest.iter().for_each(|k| {
-            let abs_path = self.destination.clone().unwrap().join(k);
-
-            println!("Removing: {}", abs_path.display());
-            std::fs::remove_file(&abs_path).unwrap();
-
-            let dfiles = self.destination_files.as_mut().unwrap();
-            let p = k.clone();
-            dfiles.remove(&p);
-            self.file_tree.set_sync_info(
-                &k,
-                SyncedEntry {
-                    intention: SyncIntention::DropSync,
-                    synced: true,
-                },
-            );
-        });
+        // to_remove_from_dest.iter().for_each(|k| {
+        //     let abs_path = self.destination.clone().unwrap().join(k);
+        //
+        //     println!("Removing: {}", abs_path.display());
+        //     std::fs::remove_file(&abs_path).unwrap();
+        //
+        //     let dfiles = self.destination_files.as_mut().unwrap();
+        //     let p = k.clone();
+        //     dfiles.remove(&p);
+        //     self.file_tree.set_sync_info(
+        //         &k,
+        //         SyncedEntry {
+        //             intention: SyncIntention::DropSync,
+        //             synced: true,
+        //         },
+        //     );
+        // });
 
         // remove those entries that are in dest, but not in index
         let destination_extra = self
@@ -364,66 +548,84 @@ impl DissonanceApp {
             .unwrap()
             .iter()
             .filter(|path| self.file_tree.find(path).is_none())
-            .map(|k| k.clone())
-            .collect::<Vec<PathBuf>>();
+            .map(|k| {
+                FilesystemAction::Remove(RemoveFileAction {
+                    base_abs : self.destination.clone().unwrap(),
+                    relative : k.clone(),
+                })
+            })
+            .collect::<Vec<FilesystemAction>>();
 
-        destination_extra.iter().for_each(|k| {
-            let abs_path = self.destination.clone().unwrap().join(k);
+        filesystem_actions.extend(destination_extra);
 
-            println!("Removing: {}", abs_path.display());
-            std::fs::remove_file(&abs_path).unwrap();
-
-            let dfiles = self.destination_files.as_mut().unwrap();
-            let p = k.clone();
-            dfiles.remove(&p);
-        });
+        // destination_extra.iter().for_each(|k| {
+        //     let abs_path = self.destination.clone().unwrap().join(k);
+        //
+        //     println!("Removing: {}", abs_path.display());
+        //     std::fs::remove_file(&abs_path).unwrap();
+        //
+        //     let dfiles = self.destination_files.as_mut().unwrap();
+        //     let p = k.clone();
+        //     dfiles.remove(&p);
+        // });
 
         let to_copy_to_dest = unsynced
             .iter()
             .filter(|(_, v)| v.intention == SyncIntention::KeepSync)
-            .map(|(k, _)| k.clone())
-            .collect::<Vec<PathBuf>>();
+            .map(|(k, _)| {
+                FilesystemAction::Copy(CopyFileAction {
+                    from_base_abs : self.source.clone().unwrap(),
+                    to_base_abs : self.destination.clone().unwrap(),
+                    relative : k.clone(),
+                })
+            })
+            .collect::<Vec<FilesystemAction>>();
 
-        to_copy_to_dest.iter().for_each(|k| {
-            let source_abs_path = self.source.clone().unwrap().join(k);
-            let dest_abs_path = self.destination.clone().unwrap().join(k);
+        filesystem_actions.extend(to_copy_to_dest);
 
-            match fs::create_dir_all(dest_abs_path.parent().expect("No parent on mkdir")) {
-                Err(e) => println!(
-                    "ERROR Failed to create dir: {} ({})",
-                    dest_abs_path.display(),
-                    e
-                ),
-                Ok(_) => {}
-            }
+        self.filesystem_actions = filesystem_actions;
+        // to_copy_to_dest.iter().for_each(|k| {
+        //     let source_abs_path = self.source.clone().unwrap().join(k);
+        //     let dest_abs_path = self.destination.clone().unwrap().join(k);
+        //
+        //     match fs::create_dir_all(dest_abs_path.parent().expect("No parent on mkdir")) {
+        //         Err(e) => println!(
+        //             "ERROR Failed to create dir: {} ({})",
+        //             dest_abs_path.display(),
+        //             e
+        //         ),
+        //         Ok(_) => {}
+        //     }
+        //
+        //     match mtp_copy(&source_abs_path, &dest_abs_path) {
+        //         Err(e) => println!(
+        //             "ERROR Failed to copy: {} -> {} ({})",
+        //             source_abs_path.display(),
+        //             dest_abs_path.display(),
+        //             e
+        //         ),
+        //         Ok(_) => {
+        //             let dfiles = self.destination_files.as_mut().unwrap();
+        //             dfiles.insert(k.clone());
+        //             self.file_tree.set_sync_info(
+        //                 &k,
+        //                 SyncedEntry {
+        //                     intention: SyncIntention::KeepSync,
+        //                     synced: true,
+        //                 },
+        //             );
+        //
+        //             println!("Copied: {}", dest_abs_path.display())
+        //         }
+        //     }
+        // });
 
-            match mtp_copy(&source_abs_path, &dest_abs_path) {
-                Err(e) => println!(
-                    "ERROR Failed to copy: {} -> {} ({})",
-                    source_abs_path.display(),
-                    dest_abs_path.display(),
-                    e
-                ),
-                Ok(_) => {
-                    let dfiles = self.destination_files.as_mut().unwrap();
-                    dfiles.insert(k.clone());
-                    self.file_tree.set_sync_info(
-                        &k,
-                        SyncedEntry {
-                            intention: SyncIntention::KeepSync,
-                            synced: true,
-                        },
-                    );
+        // TODO
 
-                    println!("Copied: {}", dest_abs_path.display())
-                }
-            }
-        });
-
-        println!("Removing empty subdirs");
-        let _ = remove_empty_subdirs::remove_empty_subdirs(&self.destination.clone().unwrap());
-
-        println!("Finished sync");
+        // println!("Removing empty subdirs");
+        // let _ = remove_empty_subdirs::remove_empty_subdirs(&self.destination.clone().unwrap());
+        //
+        // println!("Finished sync");
     }
 
     fn load_index() -> BTreeMap<PathBuf, SyncedEntry> {
