@@ -1,8 +1,8 @@
 use futures::SinkExt;
 use iced::{
-    Application, Command, Element, Length, Settings, Subscription, Theme, alignment, executor,
-    futures, subscription,
-    widget::{Column, TextInput, button, column, container, row, scrollable, text},
+    Alignment, Application, Command, Element, Length, Settings, Subscription, Theme, alignment,
+    executor, futures, subscription,
+    widget::{Column, TextInput, button, column, container, progress_bar, row, scrollable, text},
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,7 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
+    convert::Infallible,
     fmt::{self, Display},
     fs::{self, File},
     io::{self, BufWriter, Read, Write},
@@ -57,7 +58,8 @@ enum Message {
     StartSync,
     StartIndexing,
 
-    FilesystemActionDone((FilesystemAction, bool)),
+    FilesystemActionDone(FilesystemActionReport),
+    // ProgressWindowClose,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -82,7 +84,11 @@ struct DissonanceApp {
 
     destination_files: Option<HashSet<PathBuf>>,
 
+    sub_iter: usize,
     filesystem_actions: Vec<FilesystemAction>,
+
+    show_progress_window: bool,
+    progress: f32, // 0.0 ..= 1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -136,6 +142,14 @@ enum FilesystemAction {
     Remove(RemoveFileAction),
 }
 
+#[derive(Debug, Clone)]
+struct FilesystemActionReport {
+    action: FilesystemAction,
+    status: bool,
+    iter: usize,
+    total_size: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Ord, PartialOrd)]
 enum SyncIntention {
     Unspecified, // top prio
@@ -178,7 +192,11 @@ impl Drop for DissonanceApp {
     }
 }
 
-fn process_filesystem_action(file: &FilesystemAction) -> (FilesystemAction, bool) {
+fn process_filesystem_action(
+    file: &FilesystemAction,
+    iter: usize,
+    total_size: usize,
+) -> FilesystemActionReport {
     match file {
         FilesystemAction::Copy(copy_action) => {
             let from_abs = copy_action.from_base_abs.join(&copy_action.relative);
@@ -196,14 +214,24 @@ fn process_filesystem_action(file: &FilesystemAction) -> (FilesystemAction, bool
                 Ok(_) => true,
             };
 
-            (FilesystemAction::Copy(copy_action.clone()), ok)
+            FilesystemActionReport {
+                action: FilesystemAction::Copy(copy_action.clone()),
+                status: ok,
+                iter: iter,
+                total_size: total_size,
+            }
         }
         FilesystemAction::Remove(remove_action) => {
             let from_abs = remove_action.base_abs.join(&remove_action.relative);
             println!("Removing: {}", from_abs.display());
             std::fs::remove_file(&from_abs).unwrap();
 
-            (FilesystemAction::Remove(remove_action.clone()), true)
+            FilesystemActionReport {
+                action: FilesystemAction::Remove(remove_action.clone()),
+                status: true,
+                iter: iter,
+                total_size: total_size,
+            }
         }
     }
 }
@@ -215,76 +243,26 @@ impl Application for DissonanceApp {
     type Flags = ();
 
     fn subscription(&self) -> Subscription<Message> {
-        let mut files = self.filesystem_actions.clone();
+        let files: Vec<FilesystemAction> = self.filesystem_actions.clone();
 
         if files.is_empty() {
             return Subscription::none();
         }
 
         return subscription::channel(
-            std::any::TypeId::of::<()>(),
+            self.sub_iter,
             100,
             move |mut output| async move {
-                loop {
-                    // if files.is_empty() {
-                    //     time::sleep(std::time::Duration::from_secs(1)).await;
-                    //     continue;
-                    // }
+                println!("Processing {} files", files.len());
 
-                    for file in files.iter() {
-                        match file {
-                            FilesystemAction::Copy(copy_action) => {
-                                let from_abs = copy_action.from_base_abs.join(&copy_action.relative);
-                                let to_abs = copy_action.to_base_abs.join(&copy_action.relative);
-                                match fs::create_dir_all(
-                                    to_abs.parent().expect("No parent on mkdir"),
-                                ) {
-                                    Err(e) => println!(
-                                        "ERROR Failed to create dir: {} ({})",
-                                        to_abs.display(),
-                                        e
-                                    ),
-                                    Ok(_) => {}
-                                }
-                                println!(
-                                    "Copying: {} to {}",
-                                    from_abs.display(),
-                                    to_abs.display()
-                                );
+                let total_size = files.len();
+                for (iter, file) in files.iter().enumerate() {
+                    let res = process_filesystem_action(&file, iter, total_size);
 
-                                let res = mtp_copy(&from_abs, &to_abs);
-
-                                let ok = match res {
-                                    Err(_) => false,
-                                    Ok(_) => true,
-                                };
-
-                                let _ = output
-                                    .send(Message::FilesystemActionDone((
-                                        FilesystemAction::Copy(copy_action.clone()),
-                                        ok,
-                                    )))
-                                    .await;
-                            }
-                            FilesystemAction::Remove(remove_action) => {
-                                let from_abs = remove_action.base_abs.join(&remove_action.relative);
-                                println!("Removing: {}", from_abs.display());
-                                std::fs::remove_file(&from_abs).unwrap();
-
-                                let _ = output
-                                    .send(Message::FilesystemActionDone((
-                                        FilesystemAction::Remove(remove_action.clone()),
-                                        true,
-                                    )))
-                                    .await;
-                            }
-                        }
-                    }
-                    files.clear();
-                    println!("Async end");
-
-                    // end
+                    let _ = output.send(Message::FilesystemActionDone(res)).await;
                 }
+
+                futures::future::pending::<Infallible>().await
             },
         );
     }
@@ -312,7 +290,10 @@ impl Application for DissonanceApp {
                 source: saved_state.source.clone(),
                 destination: saved_state.destination.clone(),
                 destination_files: None,
+                sub_iter: 0,
                 filesystem_actions: Vec::new(),
+                show_progress_window: false,
+                progress: 0.0,
             },
             Command::none(),
         )
@@ -428,6 +409,8 @@ impl Application for DissonanceApp {
             }
             Message::StartSync => {
                 self.sync_with_destination();
+                self.show_progress_window = true;
+                self.sub_iter = self.sub_iter + 1;
                 Command::none()
             }
             Message::FixCharacters(rel_path) => {
@@ -435,13 +418,19 @@ impl Application for DissonanceApp {
                 Command::none()
             }
 
-            Message::FilesystemActionDone((action, success)) => {
-                if !success {
-                    println!("Filesystem action failed: {:?}", action);
+            Message::FilesystemActionDone(report) => {
+                self.progress = report.iter as f32 / report.total_size as f32;
+                if report.iter + 1 == report.total_size {
+                    self.show_progress_window = false;
+                    self.progress = 0.0;
+                }
+
+                if !report.status {
+                    println!("Filesystem action failed: {:?}", report.action);
                     return Command::none();
                 }
 
-                match action {
+                match report.action {
                     FilesystemAction::Copy(copy_action) => {
                         let dfiles = self.destination_files.as_mut().unwrap();
                         dfiles.insert(copy_action.relative.clone());
@@ -470,7 +459,11 @@ impl Application for DissonanceApp {
                 }
 
                 Command::none()
-            }
+            } // Message::ProgressWindowClose => {
+              //     self.show_progress_window = false;
+              //     self.progress = 0.0;
+              //     Command::none()
+              // }
         }
     }
 
@@ -478,7 +471,7 @@ impl Application for DissonanceApp {
         let top_panel = self.render_top_panel();
         let main_panel = self.render_main_panel();
 
-        column![
+        let main = column![
             container(top_panel)
                 .height(Length::FillPortion(1))
                 .width(Length::Fill)
@@ -491,7 +484,13 @@ impl Application for DissonanceApp {
                 .padding(10),
         ]
         .height(Length::Fill)
-        .into()
+        .into();
+
+        if self.show_progress_window {
+            return Self::progress_window(self.progress);
+        } else {
+            return main;
+        }
     }
 }
 
@@ -514,32 +513,14 @@ impl DissonanceApp {
             .filter(|(_, v)| v.intention == SyncIntention::DropSync)
             .map(|(k, _)| {
                 FilesystemAction::Remove(RemoveFileAction {
-                    base_abs : self.destination.clone().unwrap(),
-                    relative : k.clone(),
+                    base_abs: self.destination.clone().unwrap(),
+                    relative: k.clone(),
                 })
             })
             .collect::<Vec<FilesystemAction>>();
 
         println!("Drop sync for {} files", to_remove_from_dest.len());
         filesystem_actions.extend(to_remove_from_dest);
-
-        // to_remove_from_dest.iter().for_each(|k| {
-        //     let abs_path = self.destination.clone().unwrap().join(k);
-        //
-        //     println!("Removing: {}", abs_path.display());
-        //     std::fs::remove_file(&abs_path).unwrap();
-        //
-        //     let dfiles = self.destination_files.as_mut().unwrap();
-        //     let p = k.clone();
-        //     dfiles.remove(&p);
-        //     self.file_tree.set_sync_info(
-        //         &k,
-        //         SyncedEntry {
-        //             intention: SyncIntention::DropSync,
-        //             synced: true,
-        //         },
-        //     );
-        // });
 
         // remove those entries that are in dest, but not in index
         let destination_extra = self
@@ -550,33 +531,22 @@ impl DissonanceApp {
             .filter(|path| self.file_tree.find(path).is_none())
             .map(|k| {
                 FilesystemAction::Remove(RemoveFileAction {
-                    base_abs : self.destination.clone().unwrap(),
-                    relative : k.clone(),
+                    base_abs: self.destination.clone().unwrap(),
+                    relative: k.clone(),
                 })
             })
             .collect::<Vec<FilesystemAction>>();
 
         filesystem_actions.extend(destination_extra);
 
-        // destination_extra.iter().for_each(|k| {
-        //     let abs_path = self.destination.clone().unwrap().join(k);
-        //
-        //     println!("Removing: {}", abs_path.display());
-        //     std::fs::remove_file(&abs_path).unwrap();
-        //
-        //     let dfiles = self.destination_files.as_mut().unwrap();
-        //     let p = k.clone();
-        //     dfiles.remove(&p);
-        // });
-
         let to_copy_to_dest = unsynced
             .iter()
             .filter(|(_, v)| v.intention == SyncIntention::KeepSync)
             .map(|(k, _)| {
                 FilesystemAction::Copy(CopyFileAction {
-                    from_base_abs : self.source.clone().unwrap(),
-                    to_base_abs : self.destination.clone().unwrap(),
-                    relative : k.clone(),
+                    from_base_abs: self.source.clone().unwrap(),
+                    to_base_abs: self.destination.clone().unwrap(),
+                    relative: k.clone(),
                 })
             })
             .collect::<Vec<FilesystemAction>>();
@@ -584,41 +554,6 @@ impl DissonanceApp {
         filesystem_actions.extend(to_copy_to_dest);
 
         self.filesystem_actions = filesystem_actions;
-        // to_copy_to_dest.iter().for_each(|k| {
-        //     let source_abs_path = self.source.clone().unwrap().join(k);
-        //     let dest_abs_path = self.destination.clone().unwrap().join(k);
-        //
-        //     match fs::create_dir_all(dest_abs_path.parent().expect("No parent on mkdir")) {
-        //         Err(e) => println!(
-        //             "ERROR Failed to create dir: {} ({})",
-        //             dest_abs_path.display(),
-        //             e
-        //         ),
-        //         Ok(_) => {}
-        //     }
-        //
-        //     match mtp_copy(&source_abs_path, &dest_abs_path) {
-        //         Err(e) => println!(
-        //             "ERROR Failed to copy: {} -> {} ({})",
-        //             source_abs_path.display(),
-        //             dest_abs_path.display(),
-        //             e
-        //         ),
-        //         Ok(_) => {
-        //             let dfiles = self.destination_files.as_mut().unwrap();
-        //             dfiles.insert(k.clone());
-        //             self.file_tree.set_sync_info(
-        //                 &k,
-        //                 SyncedEntry {
-        //                     intention: SyncIntention::KeepSync,
-        //                     synced: true,
-        //                 },
-        //             );
-        //
-        //             println!("Copied: {}", dest_abs_path.display())
-        //         }
-        //     }
-        // });
 
         // TODO
 
@@ -1282,6 +1217,21 @@ impl DissonanceApp {
             }
             _ => {}
         }
+    }
+
+    fn progress_window(progress: f32) -> Element<'static, Message> {
+        container(
+            column![
+                text("Processing…"),
+                progress_bar(0.0..=1.0, progress).width(Length::Fill),
+            ]
+            .spacing(16)
+            .align_items(Alignment::Center),
+        )
+        .padding(20)
+        // .width(300)
+        // .style(|_| iced::theme::Container::Box)
+        .into()
     }
 }
 
