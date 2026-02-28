@@ -1,6 +1,6 @@
 use crate::tags::tags::Tags;
 use crate::{FsEntry, Problem, SyncIntention, SyncedEntry};
-use audiotags::{Id3v2Tag, Tag};
+use audiotags::{AudioTagEdit, AudioTagWrite, Id3v2Tag, Tag};
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 
@@ -199,11 +199,7 @@ impl MusicFile {
         let mut full_path = self.base_path.clone();
         full_path.push(&self.relative_path);
 
-        let tag = Tag::new().read_from_path(&full_path);
-        let mut tag = match tag {
-            Ok(t) => t,
-            Err(_) => Box::new(Id3v2Tag::new()),
-        };
+        let mut tag = Box::new(Id3v2Tag::new());
 
         tag.remove_album_artist();
         tag.set_title(&tags.title.as_str());
@@ -222,17 +218,10 @@ impl MusicFile {
             .expect(format!("ERR Fail to save to {:?}", full_path).as_str());
     }
 
-    // pub fn remove_tags(&self) {
-    //     let mut full_path = self.base_path.clone();
-    //     full_path.push(&self.relative_path);
-    //     let mut tag = Tag::new().read_from_path(full_path).unwrap();
-    //
-    //     tag.remove_title();
-    //     tag.remove_album_title();
-    //     tag.remove_artist();
-    //     tag.remove_album_artist();
-    //     tag.remove_track_number();
-    // }
+    pub fn remove_tags(&self) {
+        let et = Self::empty_tags();
+        self.set_tags(&et);
+    }
 }
 
 impl FsEntryTrait for MusicFile {

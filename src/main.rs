@@ -59,7 +59,6 @@ enum Message {
     StartIndexing,
 
     FilesystemActionDone(FilesystemActionReport),
-    // ProgressWindowClose,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -118,9 +117,9 @@ enum Action {
     DropSync,
     DeleteEntry,
     // GetAlbumArt,
-    // ApplyCustomTags,
-    // ReinstallTags
+    // PurgeTags
     // ConvertToMp3
+    // ApplyCustomTags,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +145,7 @@ enum FilesystemAction {
 struct FilesystemActionReport {
     action: FilesystemAction,
     status: bool,
+
     iter: usize,
     total_size: usize,
 }
@@ -249,22 +249,19 @@ impl Application for DissonanceApp {
             return Subscription::none();
         }
 
-        return subscription::channel(
-            self.sub_iter,
-            100,
-            move |mut output| async move {
-                println!("Processing {} files", files.len());
+        return subscription::channel(self.sub_iter, 100, move |mut output| async move {
+            println!("Processing {} files", files.len());
 
-                let total_size = files.len();
-                for (iter, file) in files.iter().enumerate() {
-                    let res = process_filesystem_action(&file, iter, total_size);
+            let total_size = files.len();
+            for (iter, file) in files.iter().enumerate() {
+                let res = process_filesystem_action(&file, iter, total_size);
 
-                    let _ = output.send(Message::FilesystemActionDone(res)).await;
-                }
+                let _ = output.send(Message::FilesystemActionDone(res)).await;
+            }
 
-                futures::future::pending::<Infallible>().await
-            },
-        );
+            // let _ = remove_empty_subdirs::remove_empty_subdirs(&self.destination.clone().unwrap());
+            futures::future::pending::<Infallible>().await
+        });
     }
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
@@ -353,10 +350,6 @@ impl Application for DissonanceApp {
                 if self.source.is_none() || self.destination.is_none() {
                     return Command::none();
                 }
-
-                // TODO do i need it?
-                // println!("Indexing source files...");
-                // self.update_index_source();
 
                 if self.destination.is_none() {
                     println!("No destination. Skipping");
@@ -459,11 +452,7 @@ impl Application for DissonanceApp {
                 }
 
                 Command::none()
-            } // Message::ProgressWindowClose => {
-              //     self.show_progress_window = false;
-              //     self.progress = 0.0;
-              //     Command::none()
-              // }
+            }
         }
     }
 
@@ -554,13 +543,6 @@ impl DissonanceApp {
         filesystem_actions.extend(to_copy_to_dest);
 
         self.filesystem_actions = filesystem_actions;
-
-        // TODO
-
-        // println!("Removing empty subdirs");
-        // let _ = remove_empty_subdirs::remove_empty_subdirs(&self.destination.clone().unwrap());
-        //
-        // println!("Finished sync");
     }
 
     fn load_index() -> BTreeMap<PathBuf, SyncedEntry> {
@@ -997,8 +979,7 @@ impl DissonanceApp {
             _ => return,
         };
 
-        let tags = MusicFile::empty_tags();
-        mf.set_tags(&tags);
+        mf.remove_tags();
 
         let sync_data = mf.sync_data.clone();
 

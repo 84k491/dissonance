@@ -90,30 +90,6 @@ impl FileTree {
         return map;
     }
 
-    // TODO unused
-    // fn flat_entries(entries: &Vec<FsEntry>) -> HashSet<PathBuf> {
-    //     let mut res = HashSet::<PathBuf>::new();
-    //
-    //     for entry in entries.iter() {
-    //         match entry {
-    //             FsEntry::FsDirectory(d) => {
-    //                 let d_res = Self::flat_entries(&d.children);
-    //                 res.extend(d_res);
-    //             }
-    //             FsEntry::FsFile(_) => { /*don't index those files*/ }
-    //             FsEntry::FsMusicFile(mf) => {
-    //                 res.insert(mf.relative_path.clone());
-    //             }
-    //         }
-    //     }
-    //
-    //     return res;
-    // }
-    //
-    // pub fn flat(&self) -> HashSet<PathBuf> {
-    //     Self::flat_entries(&self.entries)
-    // }
-
     pub fn from(
         files: HashSet<PathBuf>,
         root_path: PathBuf,
@@ -303,34 +279,6 @@ impl FileTree {
         }
     }
 }
-
-// pub fn load_dir(root_path: PathBuf, target_rel_path: PathBuf) -> Vec<FsEntry> {
-//     let mut nodes = Vec::<FsEntry>::new();
-//     let target_abs_path = root_path.join(&target_rel_path);
-//
-//     let read_dir = std::fs::read_dir(&target_abs_path);
-//     if let Err(_) = read_dir {
-//         return vec![];
-//     }
-//
-//     let read_dir = read_dir.unwrap();
-//
-//     for entry in read_dir {
-//         if let Err(_) = entry {
-//             continue;
-//         }
-//
-//         let absolute_path = entry.unwrap().path();
-//         let relative_path = diff_paths(&absolute_path, &root_path)
-//             .expect("Can't create relative path")
-//             .to_path_buf();
-//
-//         let e = FsEntry::from(&root_path, &relative_path);
-//         nodes.push(e);
-//     }
-//
-//     nodes
-// }
 
 pub fn load_dir_hash_set_files_only(
     root_path: PathBuf,
