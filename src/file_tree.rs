@@ -24,7 +24,7 @@ impl FsEntry {
         }
 
         if abs_path.is_dir() {
-            let d = Directory::new(&root_path, relative_path, Vec::<FsEntry>::new());
+            let d = Directory::new(&root_path, relative_path, BTreeMap::new());
             return FsEntry::FsDirectory(d);
         } else {
             let sync_info = SyncedEntry {
@@ -54,7 +54,7 @@ impl FsEntry {
 }
 
 pub struct FileTree {
-    pub entries: Vec<FsEntry>, // TODO don't pub
+    pub entries: BTreeMap<PathBuf, FsEntry>, // TODO don't pub
 
     root_path: PathBuf,
 }
@@ -62,7 +62,7 @@ pub struct FileTree {
 impl FileTree {
     pub fn empty() -> FileTree {
         FileTree {
-            entries: Vec::<FsEntry>::new(),
+            entries: BTreeMap::new(),
             root_path: PathBuf::new(),
         }
     }
@@ -71,10 +71,10 @@ impl FileTree {
         return Self::do_create_index(&self.entries);
     }
 
-    fn do_create_index(entries: &Vec<FsEntry>) -> BTreeMap<PathBuf, SyncedEntry> {
+    fn do_create_index(entries: &BTreeMap<PathBuf, FsEntry>) -> BTreeMap<PathBuf, SyncedEntry> {
         let mut map = BTreeMap::<PathBuf, SyncedEntry>::new();
 
-        for entry in entries.iter() {
+        for (_, entry) in entries.iter() {
             match entry {
                 FsEntry::FsMusicFile(mf) => {
                     map.insert(mf.relative_path.clone(), mf.sync_data.clone());
@@ -96,7 +96,7 @@ impl FileTree {
         index: BTreeMap<PathBuf, SyncedEntry>,
     ) -> FileTree {
         let mut ft = FileTree {
-            entries: Vec::<FsEntry>::new(),
+            entries: BTreeMap::new(),
             root_path: root_path,
         };
 
@@ -113,7 +113,8 @@ impl FileTree {
     }
 
     pub fn set_sync_info(&mut self, rel_path: &PathBuf, sync_entry: SyncedEntry) {
-        let e: &mut FsEntry = Self::find_entry_mut(&mut self.entries, rel_path).expect("No entry on set sync info");
+        let e: &mut FsEntry =
+            Self::find_entry_mut(&mut self.entries, rel_path).expect("No entry on set sync info");
         match e {
             FsEntry::FsMusicFile(mf) => {
                 mf.set_sync_info(sync_entry);
@@ -129,27 +130,99 @@ impl FileTree {
         Self::find_entry(&self.entries, rel_path)
     }
 
-    fn find_entry<'a>(entries: &'a Vec<FsEntry>, rel_path: &Path) -> Option<&'a FsEntry> {
-        for entry in entries.iter() {
+    fn detach_root_parent(rel_path: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
+        let parent: PathBuf = rel_path.components().take(1).collect();
+        let right_part: PathBuf = rel_path.components().skip(1).collect();
+
+        let parent_opt: Option<PathBuf> = if parent == PathBuf::new() {
+            None
+        } else {
+            Some(parent)
+        };
+
+        let right_part_opt: Option<PathBuf> = if right_part == PathBuf::new() {
+            None
+        } else {
+            Some(right_part)
+        };
+
+        if right_part_opt.is_none() && parent_opt.is_some() {
+            return (None, parent_opt); // the only component is not a parent
+        }
+
+        return (parent_opt, right_part_opt);
+    }
+
+    fn find_entry<'a>(
+        entries: &'a BTreeMap<PathBuf, FsEntry>,
+        rel_path_right_part: &Path,
+    ) -> Option<&'a FsEntry> {
+        let (parent, right_part) = Self::detach_root_parent(rel_path_right_part);
+
+        // empty path
+        if parent.is_none() && right_part.is_none() {
+            return None;
+        }
+
+        if let Some(parent) = parent {
+            if right_part.is_none() {
+                println!(
+                    "ERROR: no right path with parent: {}",
+                    rel_path_right_part.display()
+                );
+                return None;
+            }
+            let right_part = right_part.unwrap();
+
+            let entry = entries.iter().find(|(filename, _)| **filename == parent);
+
+            if entry.is_none() {
+                return None;
+            }
+            let entry = entry.unwrap().1;
+
             match entry {
                 FsEntry::FsDirectory(d) => {
-                    if d.relative_path == rel_path {
-                        return Some(entry);
-                    } else {
-                        if let Some(entry) = Self::find_entry(&d.children, rel_path) {
-                            return Some(entry);
-                        }
+                    if d.relative_path.file_name().expect("Error on file name") != parent {
+                        return None;
                     }
+
+                    // recurse in
+                    return Self::find_entry(&d.children, right_part.as_path());
                 }
-                FsEntry::FsFile(f) => {
-                    if f.relative_path == rel_path {
-                        return Some(entry);
-                    }
+
+                // searching only directories if parent exists
+                _ => return None,
+            };
+        }
+
+        // only filename left here, just searching for match
+        let right_part = right_part.unwrap();
+
+        let entry = entries
+            .iter()
+            .find(|(filename, _)| **filename == right_part);
+
+        if entry.is_none() {
+            return None;
+        }
+        let entry = entry.unwrap().1;
+
+        match entry {
+            FsEntry::FsDirectory(d) => {
+                if d.relative_path.file_name().expect("Error on file name") == right_part {
+                    return Some(entry);
                 }
-                FsEntry::FsMusicFile(mf) => {
-                    if mf.relative_path == rel_path {
-                        return Some(entry);
-                    }
+                // no recursion
+            }
+            FsEntry::FsFile(f) => {
+                if f.relative_path.file_name().expect("Error on file name") == right_part {
+                    return Some(entry);
+                }
+            }
+            FsEntry::FsMusicFile(mf) => {
+                if mf.relative_path.file_name().expect("Error on file name") == right_part {
+                    return Some(entry);
                 }
             }
         }
@@ -157,27 +230,78 @@ impl FileTree {
         None
     }
 
+    // TODO don't copy-paste the method above
     fn find_entry_mut<'a>(
-        entries: &'a mut Vec<FsEntry>,
-        rel_path: &Path,
+        entries: &'a mut BTreeMap<PathBuf, FsEntry>,
+        rel_path_right_part: &Path,
     ) -> Option<&'a mut FsEntry> {
-        for entry in entries.iter_mut() {
-            let matches = match entry {
-                FsEntry::FsDirectory(d) => d.relative_path == rel_path,
-                FsEntry::FsFile(f) => f.relative_path == rel_path,
-                FsEntry::FsMusicFile(mf) => mf.relative_path == rel_path,
-            };
+        let (parent, right_part) = Self::detach_root_parent(rel_path_right_part);
 
-            if matches {
-                return Some(entry);
+        // empty path
+        if parent.is_none() && right_part.is_none() {
+            return None;
+        }
+
+        if let Some(parent) = parent {
+            if right_part.is_none() {
+                println!(
+                    "ERROR: no right path with parent: {}",
+                    rel_path_right_part.display()
+                );
+                return None;
             }
+            let right_part = right_part.unwrap();
 
-            if let FsEntry::FsDirectory(d) = entry {
-                if let Some(e) = Self::find_entry_mut(&mut d.children, rel_path) {
-                    return Some(e);
+            let entry = entries
+                .iter_mut()
+                .find(|(filename, _)| **filename == parent);
+
+            if entry.is_none() {
+                return None;
+            }
+            let entry = entry.unwrap();
+
+            match entry.1 {
+                FsEntry::FsDirectory(d) => {
+                    // recurse in
+                    return Self::find_entry_mut(&mut d.children, right_part.as_path());
+                }
+
+                // searching only directories if parent exists
+                _ => return None,
+            }
+        }
+
+        // only filename left here, just searching for match
+        let right_part = right_part.unwrap();
+
+        let entry = entries
+            .iter_mut()
+            .find(|(filename, _)| **filename == right_part);
+        if entry.is_none() {
+            return None;
+        }
+        let entry = entry.unwrap();
+
+        match entry.1 {
+            FsEntry::FsDirectory(d) => {
+                if d.relative_path.file_name().expect("Error on file name") == entry.0 {
+                    return Some(entry.1);
+                }
+                // no recursion
+            }
+            FsEntry::FsFile(f) => {
+                if f.relative_path.file_name().expect("Error on file name") == right_part {
+                    return Some(entry.1);
+                }
+            }
+            FsEntry::FsMusicFile(mf) => {
+                if mf.relative_path.file_name().expect("Error on file name") == right_part {
+                    return Some(entry.1);
                 }
             }
         }
+
         None
     }
 
@@ -185,47 +309,65 @@ impl FileTree {
         Self::do_remove_entry(&mut self.entries, rel_path)
     }
 
-    fn do_remove_entry(entries: &mut Vec<FsEntry>, rel_path: &PathBuf) -> bool {
-        let mut iter_to_remove: Option<usize> = None;
+    fn do_remove_entry(
+        entries: &mut BTreeMap<PathBuf, FsEntry>,
+        rel_path_right_part: &PathBuf,
+    ) -> bool {
+        let (parent, right_part) = Self::detach_root_parent(rel_path_right_part);
 
-        for (i, entry) in entries.iter_mut().enumerate() {
-            match entry {
+        // empty path
+        if parent.is_none() && right_part.is_none() {
+            return false;
+        }
+
+        if let Some(parent) = parent {
+            if right_part.is_none() {
+                println!(
+                    "ERROR: no right path with parent: {}",
+                    rel_path_right_part.display()
+                );
+                return false;
+            }
+            let right_part = right_part.unwrap();
+
+            let entry = entries
+                .iter_mut()
+                .find(|(filename, _)| **filename == parent);
+
+            if entry.is_none() {
+                return false;
+            }
+            let entry = entry.unwrap();
+
+            match entry.1 {
                 FsEntry::FsDirectory(d) => {
-                    if d.relative_path == *rel_path {
-                        iter_to_remove = Some(i);
-                    } else {
-                        if Self::do_remove_entry(&mut d.children, rel_path) {
-                            return true;
-                        }
-                    }
+                    // recurse in
+                    return Self::do_remove_entry(&mut d.children, &right_part);
                 }
-                FsEntry::FsFile(f) => {
-                    if f.relative_path == *rel_path {
-                        iter_to_remove = Some(i);
-                    }
-                }
-                FsEntry::FsMusicFile(mf) => {
-                    if mf.relative_path == *rel_path {
-                        iter_to_remove = Some(i);
-                    }
-                }
+
+                // searching only directories if parent exists
+                _ => return false,
             }
         }
 
-        if let Some(index) = iter_to_remove {
-            entries.remove(index);
-            return true;
-        } else {
-            return false;
-        }
+        // only filename left here, just searching for match
+        let right_part = right_part.unwrap();
+
+        let removed = entries.remove(&right_part);
+
+        return removed.is_some();
     }
 
     pub fn add_entry(&mut self, entry_rel_path: &PathBuf, sync_info: SyncedEntry) {
         let parent_rel_path = entry_rel_path.parent().unwrap();
 
         if parent_rel_path == Path::new("") {
-            self.entries
-                .push(FsEntry::from(&self.root_path.clone(), &entry_rel_path));
+            let filename = PathBuf::from(entry_rel_path.file_name().unwrap());
+
+            self.entries.insert(
+                filename,
+                FsEntry::from(&self.root_path.clone(), &entry_rel_path),
+            );
             return;
         }
 
@@ -254,29 +396,21 @@ impl FileTree {
                     }
                     _ => {}
                 }
-                d.children.push(entry);
+                let filename = PathBuf::from(entry_rel_path.file_name().unwrap());
+                d.children.insert(filename, entry);
             }
             _ => {}
         };
     }
 
     pub fn toggle_dir(&mut self, target: &Path) {
-        Self::toggle_dir_entries(&mut self.entries, target);
-    }
-
-    fn toggle_dir_entries(entries: &mut Vec<FsEntry>, target: &Path) {
-        for entry in entries.iter_mut() {
-            match entry {
-                FsEntry::FsDirectory(d) => {
-                    if d.relative_path == target {
-                        d.expanded = !d.expanded;
-                    } else {
-                        Self::toggle_dir_entries(&mut d.children, target);
-                    }
-                }
-                _ => continue,
-            };
-        }
+        let e = Self::find_entry_mut(&mut self.entries, target);
+        match e {
+            Some(FsEntry::FsDirectory(d)) => {
+                d.expanded = !d.expanded;
+            }
+            _ => {}
+        };
     }
 }
 

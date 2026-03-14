@@ -1,7 +1,7 @@
 use crate::tags::tags::Tags;
 use crate::{FsEntry, Problem, SyncIntention, SyncedEntry};
 use audiotags::{AudioTagEdit, AudioTagWrite, Id3v2Tag, Tag};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 pub trait FsEntryTrait {
@@ -270,11 +270,15 @@ impl FsEntryTrait for MusicFile {
 pub struct Directory {
     pub base_path: PathBuf,
     pub relative_path: PathBuf,
-    pub children: Vec<FsEntry>,
+    pub children: BTreeMap<PathBuf, FsEntry>, // filename(not path) to object
     pub expanded: bool, // TODO this is from view, not from model, move it
 }
 impl Directory {
-    pub fn new(base: &PathBuf, relative_path: &PathBuf, children: Vec<FsEntry>) -> Directory {
+    pub fn new(
+        base: &PathBuf,
+        relative_path: &PathBuf,
+        children: BTreeMap<PathBuf, FsEntry>,
+    ) -> Directory {
         let ret = Directory {
             base_path: base.clone(),
             relative_path: relative_path.clone(),
@@ -287,7 +291,7 @@ impl Directory {
     pub fn children_recursive(&self) -> Vec<PathBuf> {
         let mut ret = Vec::<PathBuf>::new();
 
-        for child in &self.children {
+        for (_, child) in &self.children {
             match child {
                 FsEntry::FsDirectory(d) => {
                     ret.extend(d.children_recursive());
@@ -305,7 +309,7 @@ impl Directory {
     pub fn intention(&self) -> SyncIntention {
         self.children
             .iter()
-            .map(|c| match c {
+            .map(|(_, c)| match c {
                 FsEntry::FsFile(_) => SyncIntention::DropSync,
                 FsEntry::FsMusicFile(mf) => mf.sync_data.intention.clone(),
                 FsEntry::FsDirectory(d) => d.sync_info().intention,
@@ -330,7 +334,7 @@ impl Directory {
     pub fn synced(&self) -> bool {
         self.children
             .iter()
-            .map(|c| match c {
+            .map(|(_, c)| match c {
                 FsEntry::FsFile(_) => false,
                 FsEntry::FsMusicFile(mf) => mf.sync_data.synced,
                 FsEntry::FsDirectory(d) => d.sync_info().synced,
@@ -341,7 +345,7 @@ impl Directory {
 
 impl FsEntryTrait for Directory {
     fn set_sync_info(&mut self, s_data: SyncedEntry) {
-        for child in &mut self.children {
+        for (_, child) in &mut self.children {
             match child {
                 FsEntry::FsFile(f) => f.set_sync_info(s_data.clone()),
                 FsEntry::FsDirectory(d) => d.set_sync_info(s_data.clone()),
@@ -351,7 +355,7 @@ impl FsEntryTrait for Directory {
     }
 
     fn has_problems(&self) -> bool {
-        for child in &self.children {
+        for (_, child) in &self.children {
             match child {
                 FsEntry::FsFile(_) => {
                     return true;
@@ -383,7 +387,7 @@ impl FsEntryTrait for Directory {
 
         let mut first = true;
 
-        for e in &self.children {
+        for (_, e) in &self.children {
             let problems = match e {
                 FsEntry::FsDirectory(d) => d.find_problems(),
                 FsEntry::FsFile(f) => f.find_problems(),

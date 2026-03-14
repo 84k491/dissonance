@@ -245,6 +245,7 @@ impl Application for DissonanceApp {
     fn subscription(&self) -> Subscription<Message> {
         let files: Vec<FilesystemAction> = self.filesystem_actions.clone();
 
+        // TODO hangs if nothing to do
         if files.is_empty() {
             return Subscription::none();
         }
@@ -958,8 +959,11 @@ impl DissonanceApp {
                 self.file_tree.add_entry(&path, sync_data);
             }
             FsEntry::FsDirectory(d) => {
-                let children: Vec<PathBuf> =
-                    d.children.iter().map(|e| e.rel_path().clone()).collect();
+                let children: Vec<PathBuf> = d
+                    .children
+                    .iter()
+                    .map(|(_, e)| e.rel_path().clone())
+                    .collect();
                 for child in children {
                     self.fix_tags(child);
                 }
@@ -1035,8 +1039,11 @@ impl DissonanceApp {
             let file = match mf_opt {
                 Some(FsEntry::FsMusicFile(mf)) => mf,
                 Some(FsEntry::FsDirectory(d)) => {
-                    let children: Vec<PathBuf> =
-                        d.children.iter().map(|e| e.rel_path().clone()).collect();
+                    let children: Vec<PathBuf> = d
+                        .children
+                        .iter()
+                        .map(|(_, e)| e.rel_path().clone())
+                        .collect();
 
                     let dir_path = d.relative_path.clone();
                     for child in children {
@@ -1092,7 +1099,7 @@ impl DissonanceApp {
     fn is_dir_synced(&self, dir: &Directory) -> bool {
         dir.children
             .iter()
-            .map(|c| match c {
+            .map(|(_, c)| match c {
                 FsEntry::FsFile(_) => false,
                 FsEntry::FsMusicFile(mf) => mf.sync_data.synced,
                 FsEntry::FsDirectory(d) => self.is_dir_synced(d),
@@ -1103,12 +1110,12 @@ impl DissonanceApp {
 
     fn render_tree(
         &self,
-        nodes: &Vec<FsEntry>,
+        nodes: &BTreeMap<PathBuf, FsEntry>,
         indent: usize,
     ) -> iced::widget::Column<'_, Message> {
         let mut col = column!().spacing(4);
 
-        for node in nodes {
+        for (_, node) in nodes {
             let rel_path = match node {
                 FsEntry::FsFile(f) => &f.relative_path,
                 FsEntry::FsMusicFile(mf) => &mf.relative_path,
@@ -1185,8 +1192,11 @@ impl DissonanceApp {
             }
             FsEntry::FsDirectory(d) => {
                 {
-                    let children: Vec<PathBuf> =
-                        d.children.iter().map(|e| e.rel_path().clone()).collect();
+                    let children: Vec<PathBuf> = d
+                        .children
+                        .iter()
+                        .map(|(_, e)| e.rel_path().clone())
+                        .collect();
 
                     for child in children {
                         self.fix_characters(&child);
