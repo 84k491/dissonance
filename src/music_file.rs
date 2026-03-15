@@ -318,14 +318,19 @@ impl Directory {
                 (SyncIntention::Unspecified, _) => SyncIntention::Unspecified,
                 (_, SyncIntention::Unspecified) => SyncIntention::Unspecified,
 
+                (SyncIntention::ForceSync, SyncIntention::DropSync) => SyncIntention::MixedDir,
+                (SyncIntention::ForceSync, SyncIntention::KeepSync) => SyncIntention::ForceSync,
+                (SyncIntention::ForceSync, SyncIntention::ForceSync) => SyncIntention::ForceSync,
+
                 (SyncIntention::KeepSync, SyncIntention::KeepSync) => SyncIntention::KeepSync,
                 (SyncIntention::KeepSync, SyncIntention::DropSync) => SyncIntention::MixedDir,
-                (SyncIntention::KeepSync, SyncIntention::MixedDir) => SyncIntention::MixedDir,
+                (SyncIntention::KeepSync, SyncIntention::ForceSync) => SyncIntention::ForceSync,
 
                 (SyncIntention::DropSync, SyncIntention::KeepSync) => SyncIntention::MixedDir,
                 (SyncIntention::DropSync, SyncIntention::DropSync) => SyncIntention::DropSync,
-                (SyncIntention::DropSync, SyncIntention::MixedDir) => SyncIntention::MixedDir,
+                (SyncIntention::DropSync, SyncIntention::ForceSync) => SyncIntention::MixedDir,
 
+                (_, SyncIntention::MixedDir) => SyncIntention::MixedDir,
                 (SyncIntention::MixedDir, _) => SyncIntention::MixedDir,
             })
             .unwrap_or(SyncIntention::Unspecified)

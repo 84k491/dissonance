@@ -50,6 +50,7 @@ impl ButtonStyle {
 
         let color = match self.intention {
             SyncIntention::KeepSync => Color::from_rgb(0.83 * coef, 0.89 * coef, 1.0 * coef),
+            SyncIntention::ForceSync => Color::from_rgb(0.53 * coef, 0.49 * coef, 1.0 * coef),
             SyncIntention::DropSync => Color::from_rgb(0.97 * coef, 0.84 * coef, 0.85 * coef),
             SyncIntention::Unspecified => Color::from_rgb(1.0 * coef, 0.9 * coef, 0.7 * coef),
             SyncIntention::MixedDir => Color::from_rgb(0.9 * coef, 0.85 * coef, 0.94 * coef),

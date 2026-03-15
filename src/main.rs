@@ -52,6 +52,7 @@ enum Message {
     DeleteFile(PathBuf),
     FixCharacters(PathBuf),
 
+    ForceSync(PathBuf),
     KeepSync(PathBuf),
     DropSync(PathBuf),
 
@@ -113,11 +114,11 @@ enum Action {
     FixTags,
     FixCharacters,
     MoveFile,
+    ForceSync,
     KeepSync,
     DropSync,
     DeleteEntry,
     // GetAlbumArt,
-    // PurgeTags
     // ConvertToMp3
     // ApplyCustomTags,
 }
@@ -154,6 +155,8 @@ struct FilesystemActionReport {
 enum SyncIntention {
     Unspecified, // top prio
     MixedDir,
+    // TODO There is a case when file was force synced, then dropped and "keep synced" again. No force will be applied
+    ForceSync,
     KeepSync,
     DropSync, // low prio
 }
@@ -171,6 +174,7 @@ impl Action {
             Action::MoveFile => Message::MoveFile(rel_path),
             Action::RemoveTags => Message::RemoveTags(rel_path),
             Action::KeepSync => Message::KeepSync(rel_path),
+            Action::ForceSync => Message::ForceSync(rel_path),
             Action::DropSync => Message::DropSync(rel_path),
             Action::DeleteEntry => Message::DeleteFile(rel_path),
             Action::FixCharacters => Message::FixCharacters(rel_path),
@@ -393,6 +397,10 @@ impl Application for DissonanceApp {
                 self.delete_entry(rel_path);
                 Command::none()
             }
+            Message::ForceSync(rel_path) => {
+                self.set_sync_intention(rel_path, SyncIntention::ForceSync);
+                Command::none()
+            }
             Message::KeepSync(rel_path) => {
                 self.set_sync_intention(rel_path, SyncIntention::KeepSync);
                 Command::none()
@@ -500,7 +508,9 @@ impl DissonanceApp {
 
         let to_remove_from_dest = unsynced
             .iter()
-            .filter(|(_, v)| v.intention == SyncIntention::DropSync)
+            .filter(|(_, v)| {
+                v.intention == SyncIntention::DropSync || v.intention == SyncIntention::ForceSync
+            })
             .map(|(k, _)| {
                 FilesystemAction::Remove(RemoveFileAction {
                     base_abs: self.destination.clone().unwrap(),
@@ -509,7 +519,7 @@ impl DissonanceApp {
             })
             .collect::<Vec<FilesystemAction>>();
 
-        println!("Drop sync for {} files", to_remove_from_dest.len());
+        println!("Removing {} files", to_remove_from_dest.len());
         filesystem_actions.extend(to_remove_from_dest);
 
         // remove those entries that are in dest, but not in index
@@ -531,7 +541,9 @@ impl DissonanceApp {
 
         let to_copy_to_dest = unsynced
             .iter()
-            .filter(|(_, v)| v.intention == SyncIntention::KeepSync)
+            .filter(|(_, v)| {
+                v.intention == SyncIntention::KeepSync || v.intention == SyncIntention::ForceSync
+            })
             .map(|(k, _)| {
                 FilesystemAction::Copy(CopyFileAction {
                     from_base_abs: self.source.clone().unwrap(),
@@ -585,6 +597,7 @@ impl DissonanceApp {
         let synced = match intention {
             SyncIntention::KeepSync => dest_available && is_in_dest,
             SyncIntention::DropSync => dest_available && !is_in_dest,
+            SyncIntention::ForceSync => false,
             SyncIntention::Unspecified => false,
             SyncIntention::MixedDir => false,
         };
@@ -647,6 +660,15 @@ impl DissonanceApp {
                         rel_path,
                         SyncedEntry {
                             intention: SyncIntention::Unspecified,
+                            synced: false,
+                        },
+                    );
+                }
+                SyncIntention::ForceSync => {
+                    self.file_tree.set_sync_info(
+                        rel_path,
+                        SyncedEntry {
+                            intention: SyncIntention::ForceSync,
                             synced: false,
                         },
                     );
@@ -774,11 +796,13 @@ impl DissonanceApp {
     fn get_suitable_actions_for_music_file(&self, mf: &MusicFile) -> BTreeSet<Action> {
         let problems = mf.find_problems();
 
-        // TODO don't let fix tags if file doesn't have both parents
+        // TODO don't let fix tags if file doesn't have album and artist
 
         let mut actions = BTreeSet::<Action>::new();
 
-        if !problems.is_empty() {
+        if problems.is_empty() {
+            actions.insert(Action::RemoveTags);
+        } else {
             for p in problems {
                 match p {
                     Problem::MissingTags => {
@@ -792,12 +816,14 @@ impl DissonanceApp {
                     _ => {}
                 }
             }
-        } else {
-            actions.insert(Action::RemoveTags);
         }
 
         match mf.sync_data.intention {
             SyncIntention::KeepSync => {
+                actions.insert(Action::DropSync);
+                actions.insert(Action::ForceSync);
+            }
+            SyncIntention::ForceSync => {
                 actions.insert(Action::DropSync);
             }
             SyncIntention::DropSync => {
@@ -824,6 +850,10 @@ impl DissonanceApp {
         match d.intention() {
             SyncIntention::KeepSync => {
                 actions.insert(Action::DropSync);
+                actions.insert(Action::ForceSync);
+            }
+            SyncIntention::ForceSync => {
+                actions.insert(Action::DropSync);
             }
             SyncIntention::DropSync => {
                 actions.insert(Action::KeepSync);
@@ -835,21 +865,25 @@ impl DissonanceApp {
         }
 
         let problems = d.find_problems();
-        for p in problems {
-            match p {
-                Problem::MissingTags => {
-                    actions.insert(Action::FixTags);
-                }
-                Problem::MismatchedTags | Problem::MismatchedPath => {
-                    actions.insert(Action::FixTags);
-                    actions.insert(Action::MoveFile);
-                    actions.insert(Action::RemoveTags);
-                }
-                Problem::InvalidFile | Problem::EmptyDirectory => {
-                    actions.insert(Action::DeleteEntry);
-                }
-                Problem::InvalidCharacters => {
-                    actions.insert(Action::FixCharacters);
+        if problems.is_empty() {
+            actions.insert(Action::RemoveTags);
+        } else {
+            for p in problems {
+                match p {
+                    Problem::MissingTags => {
+                        actions.insert(Action::FixTags);
+                    }
+                    Problem::MismatchedTags | Problem::MismatchedPath => {
+                        actions.insert(Action::FixTags);
+                        actions.insert(Action::MoveFile);
+                        actions.insert(Action::RemoveTags);
+                    }
+                    Problem::InvalidFile | Problem::EmptyDirectory => {
+                        actions.insert(Action::DeleteEntry);
+                    }
+                    Problem::InvalidCharacters => {
+                        actions.insert(Action::FixCharacters);
+                    }
                 }
             }
         }
@@ -977,20 +1011,30 @@ impl DissonanceApp {
             return;
         }
 
-        let mf_ref = self.file_tree.find(&path);
-        let mf = match mf_ref {
-            Some(FsEntry::FsMusicFile(mf)) => mf,
+        let entry = self.file_tree.find(&path);
+        match entry {
+            Some(FsEntry::FsMusicFile(mf)) => {
+                mf.remove_tags();
+
+                let sync_data = mf.sync_data.clone();
+
+                if !self.file_tree.remove_entry(&path) {
+                    println!("Failed to forget file: {}", path.display());
+                }
+                self.file_tree.add_entry(&path, sync_data);
+            }
+            Some(FsEntry::FsDirectory(d)) => {
+                let children: Vec<PathBuf> = d
+                    .children
+                    .iter()
+                    .map(|(_, e)| e.rel_path().clone())
+                    .collect();
+                for child in children {
+                    self.remove_tags(child);
+                }
+            }
             _ => return,
         };
-
-        mf.remove_tags();
-
-        let sync_data = mf.sync_data.clone();
-
-        if !self.file_tree.remove_entry(&path) {
-            println!("Failed to forget file: {}", path.display());
-        }
-        self.file_tree.add_entry(&path, sync_data);
     }
 
     fn delete_entry(&mut self, rel_path: PathBuf) {
