@@ -318,33 +318,31 @@ impl FileTree {
         entries: &mut BTreeMap<PathBuf, FsEntry>,
         rel_path_right_part: &PathBuf,
     ) -> bool {
-        let (parent, right_part) = Self::detach_root_parent(rel_path_right_part);
+        let (root, right_part) = Self::detach_root_parent(rel_path_right_part);
 
         // empty path
-        if parent.is_none() && right_part.is_none() {
+        if root.is_none() && right_part.is_none() {
             return false;
         }
 
-        if let Some(parent) = parent {
+        if let Some(root) = root {
             if right_part.is_none() {
                 println!(
-                    "ERROR: no right path with parent: {}",
+                    "ERROR: no right path with root: {}",
                     rel_path_right_part.display()
                 );
                 return false;
             }
             let right_part = right_part.unwrap();
 
-            let entry = entries
-                .iter_mut()
-                .find(|(filename, _)| **filename == parent);
+            let root_entry = entries.iter_mut().find(|(filename, _)| **filename == root);
 
-            if entry.is_none() {
+            if root_entry.is_none() {
                 return false;
             }
-            let entry = entry.unwrap();
+            let root_entry = root_entry.unwrap();
 
-            match entry.1 {
+            match root_entry.1 {
                 FsEntry::FsDirectory(d) => {
                     // recurse in
                     return Self::do_remove_entry(&mut d.children, &right_part);
@@ -385,6 +383,7 @@ impl FileTree {
                     .to_path_buf();
 
                 self.add_entry(&parent, sync_info.clone());
+
                 Self::find_entry_mut(&mut self.entries, parent_rel_path)
                     .expect("Error on adding entry")
             } else {

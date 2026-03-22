@@ -106,12 +106,60 @@ impl MusicFile {
         }
     }
 
+    // [01] Abcedgh.mp3
+    // [10] SongName.mp3
+    fn title_and_number_from_file_stem(rel_path: &PathBuf) -> Option<(String, Option<u32>)> {
+        let stem = rel_path.file_stem();
+
+        let stem = if stem.is_some() {
+            String::from(stem.unwrap().to_string_lossy())
+        } else {
+            return None;
+        };
+
+        let rest = match stem.strip_prefix('[') {
+            Some(r) => r,
+            None => return Some((stem.to_string(), None)),
+        };
+
+        let end_bracket_pos = match rest.find(']') {
+            Some(pos) => pos,
+            None => return Some((stem.to_string(), None)),
+        };
+
+        let (num_str, remaining) = rest.split_at(end_bracket_pos);
+
+        let number = match num_str.parse::<u32>() {
+            Ok(n) => n,
+            Err(_) => return Some((stem.to_string(), None)),
+        };
+
+        // Safe: remaining starts with ']'
+        let title = remaining[1..].trim_start();
+
+        return Some((title.to_string(), Some(number)));
+    }
+
+    fn title_and_number_to_file_stem(title: &str, number: Option<u32>) -> String {
+        if let Some(num) = number {
+            return format!("[{:02}] {}", num, title);
+        }
+
+        title.to_string()
+    }
+
     pub fn compose_tags_from_path(&self) -> Tags {
         let mut ret = Self::empty_tags();
-        let stem = self.relative_path.file_stem();
-        if let Some(title) = stem {
-            ret.title = title.to_str().unwrap().to_string();
+        let track_and_number_opt = Self::title_and_number_from_file_stem(&self.relative_path);
+
+        if track_and_number_opt.is_some() {
+            let (title, num) = track_and_number_opt.unwrap();
+            ret.title = title;
+            if let Some(num) = num {
+                ret.track_number = num.to_string();
+            }
         }
+
         if let Some(album_path) = self.relative_path.parent() {
             if let Some(album_dir) = album_path.file_name() {
                 ret.album = album_dir.to_str().unwrap().to_string();
@@ -123,8 +171,10 @@ impl MusicFile {
                 }
             }
         }
+
         ret.remove_slashes();
         ret.remove_invalid_symbols();
+
         return ret;
     }
 
@@ -135,12 +185,18 @@ impl MusicFile {
             t.remove_invalid_symbols();
             t
         };
+
         let ext = self.relative_path.extension().unwrap().to_str().unwrap();
         let mut ret = PathBuf::new();
+
         ret.push(&tags.artist);
         // it's a path, no need to push album artist
         ret.push(&tags.album);
-        ret.push(tags.title.clone() + "." + ext);
+
+        let file_stem =
+            Self::title_and_number_to_file_stem(&tags.title, tags.track_number.parse::<u32>().ok());
+        ret.push(file_stem + "." + ext);
+
         return ret;
     }
 
@@ -215,7 +271,7 @@ impl MusicFile {
             );
         }
         tag.write_to_path(full_path.to_str().unwrap())
-            .expect(format!("ERR Fail to save to {:?}", full_path).as_str());
+            .expect(format!("ERR Fail to save tags to {:?}", full_path).as_str());
     }
 
     pub fn remove_tags(&self) {
@@ -244,6 +300,10 @@ impl FsEntryTrait for MusicFile {
         let mut path_tags = self.compose_tags_from_path();
         path_tags.track_number = installed_tags.track_number.clone();
 
+        if installed_tags.track_number.is_empty() {
+            ret.insert(Problem::MissingTrackNumber);
+        }
+
         if path_tags != installed_tags {
             ret.insert(Problem::MismatchedTags);
         }
@@ -271,7 +331,7 @@ pub struct Directory {
     pub base_path: PathBuf,
     pub relative_path: PathBuf,
     pub children: BTreeMap<PathBuf, FsEntry>, // filename(not path) to object
-    pub expanded: bool, // TODO this is from view, not from model, move it
+    pub expanded: bool,                       // TODO this is from view, not from model, move it
 }
 impl Directory {
     pub fn new(

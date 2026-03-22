@@ -99,6 +99,7 @@ enum Problem {
     MissingTags,
     MismatchedTags,
     MismatchedPath,
+    MissingTrackNumber,
     // MissingAlbumArt,
 }
 
@@ -390,7 +391,7 @@ impl Application for DissonanceApp {
                 Command::none()
             }
             Message::MoveFile(rel_path) => {
-                self.move_file_to_tag_based_path(rel_path);
+                self.move_entry_to_tag_based_path(rel_path);
                 Command::none()
             }
             Message::DeleteFile(rel_path) => {
@@ -878,6 +879,10 @@ impl DissonanceApp {
                         actions.insert(Action::MoveFile);
                         actions.insert(Action::RemoveTags);
                     }
+                    Problem::MissingTrackNumber => {
+                        actions.insert(Action::RemoveTags);
+                        actions.insert(Action::FixTags);
+                    }
                     Problem::InvalidFile | Problem::EmptyDirectory => {
                         actions.insert(Action::DeleteEntry);
                     }
@@ -1077,10 +1082,10 @@ impl DissonanceApp {
         }
     }
 
-    fn move_file_to_tag_based_path(&mut self, path: PathBuf) {
+    fn move_entry_to_tag_based_path(&mut self, path: PathBuf) {
         let (rel_path, tag_based_rel_path) = {
-            let mf_opt = self.file_tree.find(&path);
-            let file = match mf_opt {
+            let entry_opt = self.file_tree.find(&path);
+            let file = match entry_opt {
                 Some(FsEntry::FsMusicFile(mf)) => mf,
                 Some(FsEntry::FsDirectory(d)) => {
                     let children: Vec<PathBuf> = d
@@ -1090,11 +1095,25 @@ impl DissonanceApp {
                         .collect();
 
                     let dir_path = d.relative_path.clone();
+
                     for child in children {
-                        self.move_file_to_tag_based_path(child);
+                        self.move_entry_to_tag_based_path(child);
                     }
 
-                    self.file_tree.remove_entry(&dir_path);
+                    // removing dir if it's empty
+                    {
+                        let dir = self.file_tree.find(&dir_path).expect("No dir on moving");
+                        match dir {
+                            FsEntry::FsDirectory(d) => {
+                                if d.children.is_empty() {
+                                    self.file_tree.remove_entry(&dir_path);
+                                }
+                            }
+                            _ => {
+                                panic!("Expected dir");
+                            }
+                        };
+                    }
 
                     return;
                 }
@@ -1160,11 +1179,7 @@ impl DissonanceApp {
         let mut col = column!().spacing(4);
 
         for (_, node) in nodes {
-            let rel_path = match node {
-                FsEntry::FsFile(f) => &f.relative_path,
-                FsEntry::FsMusicFile(mf) => &mf.relative_path,
-                FsEntry::FsDirectory(d) => &d.relative_path,
-            };
+            let rel_path = node.rel_path();
             let label = rel_path.file_name().unwrap().to_string_lossy().to_string();
 
             let button = match node {
