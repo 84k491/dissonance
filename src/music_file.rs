@@ -104,6 +104,7 @@ impl MusicFile {
             artist: String::new(),
             track_number: String::new(),
             year: String::new(),
+            has_art: false,
         }
     }
 
@@ -276,6 +277,7 @@ impl MusicFile {
             artist: String::new(),
             track_number: String::new(),
             year: String::new(),
+            has_art: false,
         };
 
         if let Some(title) = tag.title() {

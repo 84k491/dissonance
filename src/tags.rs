@@ -10,6 +10,7 @@ pub mod tags {
         pub year: String,
         pub title: String,
         pub track_number: String,
+        pub has_art: bool,
     }
     impl Tags {
         pub fn remove_slashes(&mut self) {

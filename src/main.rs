@@ -68,7 +68,7 @@ struct AppSavedState {
     destination: Option<PathBuf>,
 }
 
-static CONFIG_ABS_PATH: &'static str = "/home/bakar/.config/dissonance"; // TODO
+static CONFIG_REL_PATH: &'static str = "/home/bakar/.config/dissonance";
 static STATE_FILENAME: &'static str = "saved_state.json";
 static INDEX_FILENAME: &'static str = "index.json";
 
@@ -561,7 +561,10 @@ impl DissonanceApp {
     }
 
     fn load_index() -> BTreeMap<PathBuf, SyncedEntry> {
-        let path = PathBuf::from(CONFIG_ABS_PATH).join(INDEX_FILENAME);
+        let pwd = std::env::home_dir().expect("Failed to get home dir");
+        let path = pwd
+            .join(PathBuf::from(CONFIG_REL_PATH))
+            .join(INDEX_FILENAME);
         let file = match File::open(path) {
             Err(e) => {
                 println!("Failed to open index: {}", e);
@@ -609,7 +612,10 @@ impl DissonanceApp {
     }
 
     fn save_index(index: BTreeMap<PathBuf, SyncedEntry>) {
-        let path = PathBuf::from(CONFIG_ABS_PATH).join(INDEX_FILENAME);
+        let pwd = std::env::home_dir().expect("Failed to get home dir");
+        let path = pwd
+            .join(PathBuf::from(CONFIG_REL_PATH))
+            .join(INDEX_FILENAME);
         match fs::create_dir_all(path.parent().expect("No parent on index save")) {
             Err(e) => println!("Failed to create dir {}: {}", path.display(), e),
             Ok(_) => {}
@@ -1292,7 +1298,10 @@ async fn load_root_dir(root_path: PathBuf, target_rel_path: PathBuf) -> HashSet<
 }
 
 fn load_saved_state() -> AppSavedState {
-    let path = PathBuf::from(CONFIG_ABS_PATH).join(STATE_FILENAME);
+    let pwd = std::env::home_dir().expect("Failed to get home dir");
+    let path = pwd
+        .join(PathBuf::from(CONFIG_REL_PATH))
+        .join(STATE_FILENAME);
     let file = match File::open(&path) {
         Err(e) => {
             println!("Failed to open saved state {}: {}", path.display(), e);
@@ -1319,7 +1328,10 @@ fn load_saved_state() -> AppSavedState {
 }
 
 fn save_state(source: Option<PathBuf>, destination: Option<PathBuf>) {
-    let path = PathBuf::from(CONFIG_ABS_PATH).join(STATE_FILENAME);
+    let pwd = std::env::home_dir().expect("Failed to get home dir");
+    let path = pwd
+        .join(PathBuf::from(CONFIG_REL_PATH))
+        .join(STATE_FILENAME);
     match fs::create_dir_all(path.parent().expect("No parent on state save")) {
         Err(e) => println!("Failed to create dir {}: {}", path.display(), e),
         Ok(_) => {}
