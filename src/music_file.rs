@@ -103,6 +103,7 @@ impl MusicFile {
             album_artist: String::new(),
             artist: String::new(),
             track_number: String::new(),
+            year: String::new(),
         }
     }
 
@@ -140,12 +141,55 @@ impl MusicFile {
         return Some((title.to_string(), Some(number)));
     }
 
+    // [10] SongName.mp3
     fn title_and_number_to_file_stem(title: &str, number: Option<u32>) -> String {
         if let Some(num) = number {
             return format!("[{:02}] {}", num, title);
         }
 
         title.to_string()
+    }
+
+    // [1999] AlbumName
+    fn album_and_year_from_dir_name(dir: &PathBuf) -> Option<(String, Option<u32>)> {
+        let stem = dir.file_stem();
+
+        let stem = if stem.is_some() {
+            String::from(stem.unwrap().to_string_lossy())
+        } else {
+            return None;
+        };
+
+        let rest = match stem.strip_prefix('[') {
+            Some(r) => r,
+            None => return Some((stem.to_string(), None)),
+        };
+
+        let end_bracket_pos = match rest.find(']') {
+            Some(pos) => pos,
+            None => return Some((stem.to_string(), None)),
+        };
+
+        let (num_str, remaining) = rest.split_at(end_bracket_pos);
+
+        let number = match num_str.parse::<u32>() {
+            Ok(n) => n,
+            Err(_) => return Some((stem.to_string(), None)),
+        };
+
+        // Safe: remaining starts with ']'
+        let album = remaining[1..].trim_start();
+
+        return Some((album.to_string(), Some(number)));
+    }
+
+    fn dir_name_from_album_and_year(album: &str, year: Option<u32>) -> String {
+        if let Some(year) = year {
+            if year != 0 {
+                return format!("[{:04}] {}", year, album);
+            }
+        }
+        album.to_string()
     }
 
     pub fn compose_tags_from_path(&self) -> Tags {
@@ -161,8 +205,13 @@ impl MusicFile {
         }
 
         if let Some(album_path) = self.relative_path.parent() {
-            if let Some(album_dir) = album_path.file_name() {
-                ret.album = album_dir.to_str().unwrap().to_string();
+            let album_and_year_opt = Self::album_and_year_from_dir_name(&album_path.to_path_buf());
+
+            if let Some(album_and_year) = album_and_year_opt {
+                ret.album = album_and_year.0;
+                if let Some(year) = album_and_year.1 {
+                    ret.year = year.to_string();
+                }
             }
 
             if let Some(artist_path) = album_path.parent() {
@@ -191,7 +240,9 @@ impl MusicFile {
 
         ret.push(&tags.artist);
         // it's a path, no need to push album artist
-        ret.push(&tags.album);
+        let album_dir =
+            Self::dir_name_from_album_and_year(&tags.album, tags.year.parse::<u32>().ok());
+        ret.push(album_dir);
 
         let file_stem =
             Self::title_and_number_to_file_stem(&tags.title, tags.track_number.parse::<u32>().ok());
@@ -224,6 +275,7 @@ impl MusicFile {
             album_artist: String::new(),
             artist: String::new(),
             track_number: String::new(),
+            year: String::new(),
         };
 
         if let Some(title) = tag.title() {
@@ -244,6 +296,10 @@ impl MusicFile {
 
         if let Some(track_number) = tag.track_number() {
             ret.track_number = track_number.to_string();
+        }
+
+        if let Some(year) = tag.year() {
+            ret.year = year.to_string();
         }
 
         ret.remove_slashes();
@@ -268,6 +324,16 @@ impl MusicFile {
                 "WARN Failed to parse track number: {}, value: '{}'",
                 self.relative_path.display(),
                 tags.track_number
+            );
+        }
+
+        if let Ok(y) = tags.year.parse::<i32>() {
+            tag.set_year(y);
+        } else {
+            println!(
+                "WARN Failed to parse year: {}, value: '{}'",
+                self.relative_path.display(),
+                tags.year
             );
         }
         tag.write_to_path(full_path.to_str().unwrap())
@@ -302,6 +368,10 @@ impl FsEntryTrait for MusicFile {
 
         if installed_tags.track_number.is_empty() {
             ret.insert(Problem::MissingTrackNumber);
+        }
+
+        if installed_tags.year.is_empty() {
+            ret.insert(Problem::MissingYear);
         }
 
         if path_tags != installed_tags {

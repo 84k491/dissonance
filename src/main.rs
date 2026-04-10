@@ -100,6 +100,7 @@ enum Problem {
     MismatchedTags,
     MismatchedPath,
     MissingTrackNumber,
+    MissingYear,
     // MissingAlbumArt,
 }
 
@@ -879,7 +880,7 @@ impl DissonanceApp {
                         actions.insert(Action::MoveFile);
                         actions.insert(Action::RemoveTags);
                     }
-                    Problem::MissingTrackNumber => {
+                    Problem::MissingTrackNumber | Problem::MissingYear => {
                         actions.insert(Action::RemoveTags);
                         actions.insert(Action::FixTags);
                     }
