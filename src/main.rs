@@ -68,7 +68,7 @@ struct AppSavedState {
     destination: Option<PathBuf>,
 }
 
-static CONFIG_REL_PATH: &'static str = "/home/bakar/.config/dissonance";
+static CONFIG_REL_PATH: &'static str = ".config/dissonance";
 static STATE_FILENAME: &'static str = "saved_state.json";
 static INDEX_FILENAME: &'static str = "index.json";
 
