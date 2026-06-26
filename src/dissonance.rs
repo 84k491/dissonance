@@ -826,3 +826,133 @@ fn mtp_copy(src: &PathBuf, dst: &PathBuf) -> io::Result<u64> {
 
     Ok(total)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AppSavedState, Dissonance, FilesystemAction, SyncIntention};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    enum TestEntryKind {
+        MusicFile,
+        InvalidFile,
+        EmptyDir,
+    }
+
+    struct TestEntry<'a> {
+        path: &'a str,
+        kind: TestEntryKind,
+    }
+
+    struct TestDirs {
+        root: PathBuf,
+        source: PathBuf,
+        destination: PathBuf,
+    }
+
+    impl TestDirs {
+        fn new(source_entries: &[TestEntry<'_>], destination_entries: &[TestEntry<'_>]) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("dissonance-backend-test-{unique}"));
+            let source = root.join("source");
+            let destination = root.join("destination");
+
+            fs::create_dir_all(&source).expect("create source root");
+            fs::create_dir_all(&destination).expect("create destination root");
+            Self::populate(&source, source_entries);
+            Self::populate(&destination, destination_entries);
+
+            Self {
+                root,
+                source,
+                destination,
+            }
+        }
+
+        fn populate(base: &Path, entries: &[TestEntry<'_>]) {
+            for entry in entries {
+                let path = base.join(entry.path);
+                match entry.kind {
+                    TestEntryKind::MusicFile | TestEntryKind::InvalidFile => {
+                        fs::create_dir_all(path.parent().expect("test file without parent"))
+                            .expect("create parent directories for test file");
+                        fs::write(&path, b"test").expect("create test file");
+                    }
+                    TestEntryKind::EmptyDir => {
+                        fs::create_dir_all(&path).expect("create test directory");
+                    }
+                }
+            }
+        }
+
+        fn source(&self) -> &Path {
+            &self.source
+        }
+
+        fn destination(&self) -> &Path {
+            &self.destination
+        }
+    }
+
+    impl Drop for TestDirs {
+        fn drop(&mut self) {
+            if self.root.exists() {
+                fs::remove_dir_all(&self.root).expect("remove test directory");
+            }
+        }
+    }
+
+    #[test]
+    fn basic_sync_scenario() {
+        let dirs = TestDirs::new(
+            &[
+                TestEntry {
+                    path: "artist/album/song.mp3",
+                    kind: TestEntryKind::MusicFile,
+                },
+                TestEntry {
+                    path: "artist/readme.txt",
+                    kind: TestEntryKind::InvalidFile,
+                },
+                TestEntry {
+                    path: "empty",
+                    kind: TestEntryKind::EmptyDir,
+                },
+            ],
+            &[],
+        );
+        let saved_state = AppSavedState {
+            source: Some(dirs.source().to_path_buf()),
+            destination: Some(dirs.destination().to_path_buf()),
+        };
+        let mut backend = Dissonance::new(saved_state);
+
+        let source_files = crate::file_tree::load_dir_hash_set_files_only(
+            dirs.source().to_path_buf(),
+            PathBuf::new(),
+        );
+        backend.handle_root_loaded(source_files);
+        backend.set_sync_intention(
+            PathBuf::from("artist/album/song.mp3"),
+            SyncIntention::KeepSync,
+        );
+
+        backend.sync_with_destination();
+
+        assert_eq!(backend.filesystem_actions.len(), 1);
+        match &backend.filesystem_actions[0] {
+            FilesystemAction::Copy(copy) => {
+                assert_eq!(copy.from_base_abs, dirs.source().to_path_buf());
+                assert_eq!(copy.to_base_abs, dirs.destination().to_path_buf());
+                assert_eq!(copy.relative, PathBuf::from("artist/album/song.mp3"));
+            }
+            other => panic!("expected copy action, got {other:?}"),
+        }
+    }
+}
