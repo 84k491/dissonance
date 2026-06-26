@@ -456,3 +456,144 @@ pub fn load_dir_hash_set_files_only(
 
     nodes
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{FileTree, FsEntry, load_dir_hash_set_files_only};
+    use crate::{SyncIntention, SyncedEntry};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    enum TestEntryKind {
+        MusicFile,
+        File,
+        EmptyDir,
+    }
+
+    struct TestEntry<'a> {
+        path: &'a str,
+        kind: TestEntryKind,
+    }
+
+    struct TestFilesystem {
+        root: PathBuf,
+    }
+
+    impl TestFilesystem {
+        fn new(entries: &[TestEntry<'_>]) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("dissonance-file-tree-test-{unique}"));
+
+            for entry in entries {
+                let path = root.join(entry.path);
+                match entry.kind {
+                    TestEntryKind::MusicFile | TestEntryKind::File => {
+                        fs::create_dir_all(path.parent().expect("test file without parent"))
+                            .expect("create parent directories for test file");
+                        fs::write(&path, b"test").expect("create test file");
+                    }
+                    TestEntryKind::EmptyDir => {
+                        fs::create_dir_all(&path).expect("create test directory");
+                    }
+                }
+            }
+
+            Self { root }
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for TestFilesystem {
+        fn drop(&mut self) {
+            if self.root.exists() {
+                fs::remove_dir_all(&self.root).expect("remove test directory");
+            }
+        }
+    }
+
+    #[test]
+    fn load_dir_basic_scenario() {
+        let fs = TestFilesystem::new(&[
+            TestEntry {
+                path: "root.txt",
+                kind: TestEntryKind::File,
+            },
+            TestEntry {
+                path: "artist/album/song.mp3",
+                kind: TestEntryKind::MusicFile,
+            },
+            TestEntry {
+                path: "empty",
+                kind: TestEntryKind::EmptyDir,
+            },
+        ]);
+
+        let files = load_dir_hash_set_files_only(fs.root().to_path_buf(), PathBuf::new());
+
+        let expected = HashSet::from([
+            PathBuf::from("root.txt"),
+            PathBuf::from("artist/album/song.mp3"),
+        ]);
+
+        assert_eq!(files, expected);
+    }
+
+    #[test]
+    fn scan_every_type_of_entry_and_create_default_index() {
+        let fs = TestFilesystem::new(&[
+            TestEntry {
+                path: "artist/album/song.mp3",
+                kind: TestEntryKind::MusicFile,
+            },
+            TestEntry {
+                path: "artist/readme.txt",
+                kind: TestEntryKind::File,
+            },
+        ]);
+
+        let empty_index = BTreeMap::<PathBuf, SyncedEntry>::new();
+        let files = load_dir_hash_set_files_only(fs.root().to_path_buf(), PathBuf::new());
+        let tree = FileTree::from(files, fs.root().to_path_buf(), empty_index);
+
+        assert!(matches!(
+            tree.find(PathBuf::from("artist").as_path()),
+            Some(FsEntry::FsDirectory(_))
+        ));
+        assert!(matches!(
+            tree.find(PathBuf::from("artist/album").as_path()),
+            Some(FsEntry::FsDirectory(_))
+        ));
+        assert!(matches!(
+            tree.find(PathBuf::from("artist/readme.txt").as_path()),
+            Some(FsEntry::FsFile(_))
+        ));
+
+        match tree.find(PathBuf::from("artist/album/song.mp3").as_path()) {
+            Some(FsEntry::FsMusicFile(mf)) => {
+                assert_eq!(mf.sync_data.intention, SyncIntention::Unspecified);
+                assert!(!mf.sync_data.synced);
+            }
+            _ => panic!("expected music file entry"),
+        }
+
+        let created_index = tree.create_index();
+        assert_eq!(created_index.len(), 1);
+
+        let indexed_song = created_index
+            .get(&PathBuf::from("artist/album/song.mp3"))
+            .expect("expected song in created index");
+
+        assert_eq!(indexed_song.intention, SyncIntention::Unspecified);
+        assert!(!indexed_song.synced);
+    }
+}
