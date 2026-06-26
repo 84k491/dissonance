@@ -829,7 +829,9 @@ fn mtp_copy(src: &PathBuf, dst: &PathBuf) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSavedState, Dissonance, FilesystemAction, SyncIntention};
+    use super::{
+        AppSavedState, Dissonance, FilesystemAction, SyncIntention, process_filesystem_action,
+    };
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -908,6 +910,16 @@ mod tests {
         }
     }
 
+    fn apply_filesystem_actions(backend: &mut Dissonance) {
+        let actions = backend.filesystem_actions.clone();
+        let total_size = actions.len();
+
+        for (iter, action) in actions.iter().enumerate() {
+            let report = process_filesystem_action(action, iter, total_size);
+            backend.handle_filesystem_action_done(&report);
+        }
+    }
+
     #[test]
     fn basic_sync_scenario() {
         let dirs = TestDirs::new(
@@ -954,5 +966,12 @@ mod tests {
             }
             other => panic!("expected copy action, got {other:?}"),
         }
+
+        apply_filesystem_actions(&mut backend);
+
+        assert!(dirs.destination().join("artist/album/song.mp3").is_file());
+
+        assert!(!!!dirs.destination().join("empty").exists());
+        assert!(!!!dirs.destination().join("artist/readme.txt").exists());
     }
 }
