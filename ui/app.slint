@@ -31,9 +31,6 @@ export component AppWindow inherits Window {
     in property <[TextRow]> problems;
     in property <[ActionRow]> actions;
 
-    in property <bool> show-progress;
-    in property <float> progress;
-
     // UI -> Rust
     callback source-accepted();
     callback destination-accepted();
@@ -43,7 +40,7 @@ export component AppWindow inherits Window {
     callback action-clicked(string);
 
     // Main view
-    if !root.show-progress: VerticalBox {
+    VerticalBox {
         // Top panel: source / destination inputs + Sync / Index buttons
         VerticalLayout {
             spacing: 4px;
@@ -127,16 +124,36 @@ export component AppWindow inherits Window {
             }
         }
     }
+}
 
-    // Progress view (swaps out the main view during a sync)
-    if root.show-progress: VerticalBox {
+// Standalone window shown while a sync runs. It does not close on its own;
+// the user dismisses it with the Close button.
+export component ProgressWindow inherits Window {
+    title: "Syncing";
+    preferred-width: 360px;
+    preferred-height: 140px;
+
+    in property <float> progress;
+    in property <bool> done;
+
+    callback close-window();
+
+    VerticalBox {
         alignment: center;
+        spacing: 12px;
         Text {
-            text: "Processing…";
+            text: root.done ? "Sync complete" : "Processing…";
             horizontal-alignment: center;
         }
         ProgressIndicator {
             progress: root.progress;
+        }
+        HorizontalLayout {
+            alignment: center;
+            Button {
+                text: "Close";
+                clicked => { root.close-window(); }
+            }
         }
     }
 }

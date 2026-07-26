@@ -1,6 +1,8 @@
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     path::PathBuf,
+    rc::Rc,
     sync::{Arc, Mutex},
     thread,
 };
@@ -31,6 +33,7 @@ fn main() -> Result<(), slint::PlatformError> {
         .clone()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+
     let dest_str = saved_state
         .destination
         .clone()
@@ -40,6 +43,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let backend = Arc::new(Mutex::new(Dissonance::new(saved_state)));
     let selected: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    // Keeps the current progress window alive; lives on the UI thread only.
+    let progress_window: Rc<RefCell<Option<ProgressWindow>>> = Rc::new(RefCell::new(None));
 
     ui.set_source(source_str.into());
     ui.set_destination(dest_str.into());
@@ -95,27 +100,45 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // Sync: build the filesystem actions, then apply them on a background thread,
-    // reporting progress back to the UI for each processed file.
+    // Sync: build the filesystem actions, open a separate progress window, then
+    // apply the actions on a background thread, reporting progress to that window
+    // and refreshing the main window as each file completes. The progress window
+    // stays open until the user closes it.
     ui.on_start_sync({
         let weak = ui.as_weak();
         let backend = backend.clone();
         let selected = selected.clone();
+        let progress_window = progress_window.clone();
         move || {
-            let ui = weak.upgrade().unwrap();
             let actions = {
                 let mut b = backend.lock().unwrap();
                 b.sync_with_destination();
                 b.filesystem_actions.clone()
             };
-            ui.set_progress(0.0);
-            ui.set_show_progress(true);
             if actions.is_empty() {
-                ui.set_show_progress(false);
                 return;
             }
 
-            let weak = weak.clone();
+            // Open a fresh progress window, replacing (and dropping) any previous one.
+            let pw = match ProgressWindow::new() {
+                Ok(pw) => pw,
+                Err(_) => return,
+            };
+            pw.set_progress(0.0);
+            pw.set_done(false);
+            {
+                let pw_weak = pw.as_weak();
+                pw.on_close_window(move || {
+                    if let Some(pw) = pw_weak.upgrade() {
+                        let _ = pw.hide();
+                    }
+                });
+            }
+            let _ = pw.show();
+            let pw_weak = pw.as_weak();
+            *progress_window.borrow_mut() = Some(pw);
+
+            let app_weak = weak.clone();
             let backend = backend.clone();
             let selected = selected.clone();
             thread::spawn(move || {
@@ -124,16 +147,24 @@ fn main() -> Result<(), slint::PlatformError> {
                     let report = process_filesystem_action(action, i, total);
                     let backend = backend.clone();
                     let selected = selected.clone();
-                    weak.upgrade_in_event_loop(move |ui| {
+                    let app_weak = app_weak.clone();
+                    let pw_weak = pw_weak.clone();
+                    slint::invoke_from_event_loop(move || {
                         let mut b = backend.lock().unwrap();
-                        ui.set_progress(report.iter as f32 / report.total_size as f32);
-                        if report.iter + 1 == report.total_size {
-                            ui.set_show_progress(false);
-                            ui.set_progress(0.0);
-                        }
                         b.handle_filesystem_action_done(&report);
-                        let s = selected.lock().unwrap();
-                        refresh(&ui, &b, &s);
+                        {
+                            let s = selected.lock().unwrap();
+                            if let Some(app) = app_weak.upgrade() {
+                                refresh(&app, &b, &s);
+                            }
+                        }
+                        drop(b);
+
+                        if let Some(pw) = pw_weak.upgrade() {
+                            let processed = report.iter + 1;
+                            pw.set_progress(processed as f32 / report.total_size as f32);
+                            pw.set_done(processed == report.total_size);
+                        }
                     })
                     .ok();
                 }
