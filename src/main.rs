@@ -1,509 +1,321 @@
-use futures::SinkExt;
-use iced::{
-    Alignment, Application, Command, Element, Length, Settings, Subscription, Theme, alignment,
-    executor, futures, subscription,
-    widget::{Column, TextInput, button, column, container, progress_bar, row, scrollable, text},
-};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
-    convert::Infallible,
+    collections::BTreeMap,
     path::PathBuf,
+    sync::{Arc, Mutex},
+    thread,
 };
+
+use slint::{ModelRc, VecModel};
 
 pub(crate) use crate::dissonance::{Problem, SyncIntention, SyncedEntry};
 pub(crate) use crate::file_tree::FsEntry;
 
 use crate::{
-    dissonance::{
-        Action, Dissonance, FilesystemAction, FilesystemActionReport, load_saved_state,
-        process_filesystem_action,
-    },
+    dissonance::{Dissonance, load_saved_state, process_filesystem_action},
+    file_tree::load_dir_hash_set_files_only,
     music_file::FsEntryTrait,
-    style::{ActionPanelStyle, ButtonStyle, InfoPanelStyle, PaneStyle, TreePanelStyle},
 };
 
 mod dissonance;
 mod file_tree;
 mod music_file;
-mod style;
 mod tags;
 
-fn main() -> iced::Result {
-    DissonanceFrontend::run(Settings::default())
-}
+slint::include_modules!();
 
-#[derive(Debug, Clone)]
-enum Message {
-    SourceUpdated(String),
-    SourceSubmited,
-    DestinationUpdated(String),
-    DestinationSubmited,
+fn main() -> Result<(), slint::PlatformError> {
+    let saved_state = load_saved_state();
 
-    RootLoaded(HashSet<PathBuf>),
+    let source_str = saved_state
+        .source
+        .clone()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dest_str = saved_state
+        .destination
+        .clone()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
-    ToggleDir(PathBuf),
-    SelectFile(PathBuf),
+    let ui = AppWindow::new()?;
+    let backend = Arc::new(Mutex::new(Dissonance::new(saved_state)));
+    let selected: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 
-    FixTags(PathBuf),
-    RemoveTags(PathBuf),
-    MoveFile(PathBuf),
-    DeleteFile(PathBuf),
-    FixCharacters(PathBuf),
+    ui.set_source(source_str.into());
+    ui.set_destination(dest_str.into());
 
-    ForceSync(PathBuf),
-    KeepSync(PathBuf),
-    DropSync(PathBuf),
-
-    StartSync,
-    StartIndexing,
-
-    FilesystemActionDone(FilesystemActionReport),
-}
-struct DissonanceFrontend {
-    backend: Dissonance,
-    selected: Option<PathBuf>,
-    input_source: String,
-    input_destination: String,
-    sub_iter: usize,
-    show_progress_window: bool,
-    progress: f32,
-}
-
-fn action_to_message(action: &Action, rel_path: PathBuf) -> Message {
-    match action {
-        Action::FixTags => Message::FixTags(rel_path),
-        Action::MoveFile => Message::MoveFile(rel_path),
-        Action::RemoveTags => Message::RemoveTags(rel_path),
-        Action::KeepSync => Message::KeepSync(rel_path),
-        Action::ForceSync => Message::ForceSync(rel_path),
-        Action::DropSync => Message::DropSync(rel_path),
-        Action::DeleteEntry => Message::DeleteFile(rel_path),
-        Action::FixCharacters => Message::FixCharacters(rel_path),
-    }
-}
-
-impl Application for DissonanceFrontend {
-    type Executor = executor::Default;
-    type Message = Message;
-    type Theme = Theme;
-    type Flags = ();
-
-    fn subscription(&self) -> Subscription<Message> {
-        let files: Vec<FilesystemAction> = self.backend.filesystem_actions.clone();
-
-        // TODO hangs if nothing to do
-        if files.is_empty() {
-            return Subscription::none();
+    // Source / destination submitted (Enter pressed)
+    ui.on_source_accepted({
+        let weak = ui.as_weak();
+        let backend = backend.clone();
+        move || {
+            let ui = weak.upgrade().unwrap();
+            let path = PathBuf::from(ui.get_source().to_string());
+            if path.exists() && path.is_dir() {
+                backend.lock().unwrap().set_source(path);
+            }
         }
+    });
 
-        return subscription::channel(self.sub_iter, 100, move |mut output| async move {
-            println!("Processing {} files", files.len());
+    ui.on_destination_accepted({
+        let weak = ui.as_weak();
+        let backend = backend.clone();
+        move || {
+            let ui = weak.upgrade().unwrap();
+            let path = PathBuf::from(ui.get_destination().to_string());
+            if path.exists() && path.is_dir() {
+                backend.lock().unwrap().set_destination(path);
+            }
+        }
+    });
 
-            let total_size = files.len();
-            for (iter, file) in files.iter().enumerate() {
-                let res = process_filesystem_action(&file, iter, total_size);
+    // Index: scan the source directory on a background thread, then rebuild the tree.
+    ui.on_start_index({
+        let weak = ui.as_weak();
+        let backend = backend.clone();
+        let selected = selected.clone();
+        move || {
+            let source = { backend.lock().unwrap().source.clone() };
+            let Some(source) = source else {
+                return;
+            };
+            let weak = weak.clone();
+            let backend = backend.clone();
+            let selected = selected.clone();
+            thread::spawn(move || {
+                let nodes = load_dir_hash_set_files_only(source.clone(), source.clone());
+                weak.upgrade_in_event_loop(move |ui| {
+                    let mut b = backend.lock().unwrap();
+                    b.handle_root_loaded(nodes);
+                    let s = selected.lock().unwrap();
+                    refresh(&ui, &b, &s);
+                })
+                .ok();
+            });
+        }
+    });
 
-                let _ = output.send(Message::FilesystemActionDone(res)).await;
+    // Sync: build the filesystem actions, then apply them on a background thread,
+    // reporting progress back to the UI for each processed file.
+    ui.on_start_sync({
+        let weak = ui.as_weak();
+        let backend = backend.clone();
+        let selected = selected.clone();
+        move || {
+            let ui = weak.upgrade().unwrap();
+            let actions = {
+                let mut b = backend.lock().unwrap();
+                b.sync_with_destination();
+                b.filesystem_actions.clone()
+            };
+            ui.set_progress(0.0);
+            ui.set_show_progress(true);
+            if actions.is_empty() {
+                ui.set_show_progress(false);
+                return;
             }
 
-            // let _ = remove_empty_subdirs::remove_empty_subdirs(&self.destination.clone().unwrap());
-            futures::future::pending::<Infallible>().await
-        });
-    }
-
-    fn new(_flags: ()) -> (Self, Command<Message>) {
-        let saved_state = load_saved_state();
-        (
-            Self {
-                input_source: saved_state
-                    .source
-                    .clone()
-                    .unwrap_or_default()
-                    .as_os_str()
-                    .to_string_lossy()
-                    .into(),
-                input_destination: saved_state
-                    .destination
-                    .clone()
-                    .unwrap_or_default()
-                    .as_os_str()
-                    .to_string_lossy()
-                    .into(),
-                backend: Dissonance::new(saved_state),
-                selected: None,
-                sub_iter: 0,
-                show_progress_window: false,
-                progress: 0.0,
-            },
-            Command::none(),
-        )
-    }
-
-    fn title(&self) -> String {
-        "Dissonance".into()
-    }
-
-    fn update(&mut self, message: Message) -> Command<Message> {
-        match message {
-            Message::SourceUpdated(source_abs_path) => {
-                self.input_source = source_abs_path;
-                Command::none()
-            }
-            Message::SourceSubmited => {
-                let path = PathBuf::from(self.input_source.clone());
-                if path.exists() && path.is_dir() {
-                    self.backend.set_source(path);
+            let weak = weak.clone();
+            let backend = backend.clone();
+            let selected = selected.clone();
+            thread::spawn(move || {
+                let total = actions.len();
+                for (i, action) in actions.iter().enumerate() {
+                    let report = process_filesystem_action(action, i, total);
+                    let backend = backend.clone();
+                    let selected = selected.clone();
+                    weak.upgrade_in_event_loop(move |ui| {
+                        let mut b = backend.lock().unwrap();
+                        ui.set_progress(report.iter as f32 / report.total_size as f32);
+                        if report.iter + 1 == report.total_size {
+                            ui.set_show_progress(false);
+                            ui.set_progress(0.0);
+                        }
+                        b.handle_filesystem_action_done(&report);
+                        let s = selected.lock().unwrap();
+                        refresh(&ui, &b, &s);
+                    })
+                    .ok();
                 }
-                Command::none()
-            }
-            Message::DestinationUpdated(dest_abs_path) => {
-                self.input_destination = dest_abs_path;
-                Command::none()
-            }
-            Message::DestinationSubmited => {
-                let path = PathBuf::from(self.input_destination.clone());
-                if path.exists() && path.is_dir() {
-                    self.backend.set_destination(path);
-                }
-                Command::none()
-            }
-            Message::StartIndexing => {
-                let source = self.backend.source.as_ref().unwrap();
-                Command::perform(
-                    load_root_dir(source.clone(), source.clone()),
-                    Message::RootLoaded,
-                )
-            }
-            Message::RootLoaded(nodes) => {
-                self.backend.handle_root_loaded(nodes);
-                Command::none()
-            }
-            Message::ToggleDir(path) => {
-                self.backend.file_tree.toggle_dir(&path);
-                self.selected = Some(path);
-                Command::none()
-            }
-            Message::SelectFile(path) => {
-                self.selected = Some(path);
-                Command::none()
-            }
-            Message::FixTags(rel_path) => {
-                self.backend.fix_tags(rel_path);
-                Command::none()
-            }
-            Message::RemoveTags(rel_path) => {
-                self.backend.remove_tags(rel_path);
-                Command::none()
-            }
-            Message::MoveFile(rel_path) => {
-                self.selected = self.backend.move_entry_to_tag_based_path(rel_path);
-                Command::none()
-            }
-            Message::DeleteFile(rel_path) => {
-                self.backend.delete_entry(rel_path);
-                Command::none()
-            }
-            Message::ForceSync(rel_path) => {
-                self.backend
-                    .set_sync_intention(rel_path, SyncIntention::ForceSync);
-                Command::none()
-            }
-            Message::KeepSync(rel_path) => {
-                self.backend
-                    .set_sync_intention(rel_path, SyncIntention::KeepSync);
-                Command::none()
-            }
-            Message::DropSync(rel_path) => {
-                self.backend
-                    .set_sync_intention(rel_path, SyncIntention::DropSync);
-                Command::none()
-            }
-            Message::StartSync => {
-                self.backend.sync_with_destination();
-                self.show_progress_window = true;
-                self.sub_iter += 1;
-                Command::none()
-            }
-            Message::FixCharacters(rel_path) => {
-                self.selected = self.backend.fix_characters(&rel_path);
-                Command::none()
-            }
-            Message::FilesystemActionDone(report) => {
-                self.progress = report.iter as f32 / report.total_size as f32;
-                if report.iter + 1 == report.total_size {
-                    self.show_progress_window = false;
-                    self.progress = 0.0;
-                }
-
-                self.backend.handle_filesystem_action_done(&report);
-                Command::none()
-            }
+            });
         }
+    });
+
+    // Tree row clicked: toggle a directory, or select any entry.
+    ui.on_row_clicked({
+        let weak = ui.as_weak();
+        let backend = backend.clone();
+        let selected = selected.clone();
+        move |path| {
+            let ui = weak.upgrade().unwrap();
+            let path = PathBuf::from(path.to_string());
+            let mut b = backend.lock().unwrap();
+            let is_dir = matches!(b.file_tree.find(&path), Some(FsEntry::FsDirectory(_)));
+            if is_dir {
+                b.file_tree.toggle_dir(&path);
+            }
+            let mut s = selected.lock().unwrap();
+            *s = Some(path);
+            refresh(&ui, &b, &s);
+        }
+    });
+
+    // Action button clicked: apply it to the currently selected entry.
+    ui.on_action_clicked({
+        let weak = ui.as_weak();
+        let backend = backend.clone();
+        let selected = selected.clone();
+        move |action| {
+            let ui = weak.upgrade().unwrap();
+            let path = { selected.lock().unwrap().clone() };
+            let Some(path) = path else {
+                return;
+            };
+            let mut b = backend.lock().unwrap();
+            match action.as_str() {
+                "FixTags" => b.fix_tags(path),
+                "RemoveTags" => b.remove_tags(path),
+                "MoveFile" => {
+                    let new_path = b.move_entry_to_tag_based_path(path);
+                    *selected.lock().unwrap() = new_path;
+                }
+                "DeleteEntry" => b.delete_entry(path),
+                "FixCharacters" => {
+                    let new_path = b.fix_characters(&path);
+                    *selected.lock().unwrap() = new_path;
+                }
+                "ForceSync" => b.set_sync_intention(path, SyncIntention::ForceSync),
+                "KeepSync" => b.set_sync_intention(path, SyncIntention::KeepSync),
+                "DropSync" => b.set_sync_intention(path, SyncIntention::DropSync),
+                _ => {}
+            }
+            let s = selected.lock().unwrap();
+            refresh(&ui, &b, &s);
+        }
+    });
+
+    // Initial paint.
+    {
+        let b = backend.lock().unwrap();
+        let s = selected.lock().unwrap();
+        refresh(&ui, &b, &s);
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let top_panel = self.render_top_panel();
-        let main_panel = self.render_main_panel();
-
-        let main = column![
-            container(top_panel)
-                .height(Length::FillPortion(1))
-                .width(Length::Fill)
-                .style(iced::theme::Container::Custom(Box::new(PaneStyle::Left)))
-                .padding(10),
-            container(main_panel)
-                .height(Length::FillPortion(6))
-                .width(Length::Fill)
-                .style(iced::theme::Container::Custom(Box::new(PaneStyle::Right)))
-                .padding(10),
-        ]
-        .height(Length::Fill)
-        .into();
-
-        if self.show_progress_window {
-            Self::progress_window(self.progress)
-        } else {
-            main
-        }
-    }
+    ui.run()
 }
 
-impl DissonanceFrontend {
-    fn render_top_panel(&self) -> iced::widget::Row<'static, Message> {
-        let targets = column![
-            TextInput::new("Source...", &self.input_source,)
-                .on_input(Message::SourceUpdated)
-                .on_submit(Message::SourceSubmited)
-                .size(12),
-            TextInput::new("Destination...", &self.input_destination)
-                .on_input(Message::DestinationUpdated)
-                .on_submit(Message::DestinationSubmited)
-                .size(12),
-            row![
-                button(text("Sync").size(16)).on_press(Message::StartSync),
-                button(text("Index").size(16)).on_press(Message::StartIndexing),
-            ]
-        ];
+/// Recompute every UI-exposed model from the current backend state.
+fn refresh(ui: &AppWindow, backend: &Dissonance, selected: &Option<PathBuf>) {
+    let mut tree_rows = Vec::new();
+    flatten_tree(backend, &backend.file_tree.entries, 0, &mut tree_rows);
+    ui.set_tree(ModelRc::new(VecModel::from(tree_rows)));
 
-        row![targets]
-    }
+    let (info, problems, actions) = build_panels(backend, selected);
+    ui.set_info_lines(ModelRc::new(VecModel::from(info)));
+    ui.set_problems(ModelRc::new(VecModel::from(problems)));
+    ui.set_actions(ModelRc::new(VecModel::from(actions)));
+}
 
-    fn render_main_panel(&self) -> iced::widget::Row<'_, Message> {
-        let tree_view = scrollable(self.render_tree(&self.backend.file_tree.entries, 0))
-            .height(Length::Fill)
-            .width(Length::Fill);
+/// Flatten the (partially expanded) tree into a list of rows, mirroring the
+/// recursive rendering the iced UI used.
+fn flatten_tree(
+    backend: &Dissonance,
+    nodes: &BTreeMap<PathBuf, FsEntry>,
+    indent: i32,
+    out: &mut Vec<TreeRow>,
+) {
+    for node in nodes.values() {
+        let rel_path = node.rel_path();
+        let name = rel_path.file_name().unwrap().to_string_lossy().into_owned();
 
-        let info_panel = self.render_info_panel();
-        let actions_panel = self.render_actions_panel();
-
-        row![
-            container(tree_view)
-                .padding(10)
-                .height(Length::Fill)
-                .width(Length::FillPortion(2))
-                .style(iced::theme::Container::Custom(Box::new(TreePanelStyle {}))),
-            container(info_panel)
-                .padding(10)
-                .height(Length::Fill)
-                .width(Length::FillPortion(4)),
-            container(actions_panel)
-                .padding(10)
-                .height(Length::Fill)
-                .width(Length::FillPortion(1))
-                .style(iced::theme::Container::Custom(Box::new(
-                    ActionPanelStyle {}
-                ))),
-        ]
-    }
-
-    fn render_info_panel(&self) -> iced::widget::Column<'static, Message> {
-        column![
-            container(self.render_file_panel())
-                .width(Length::Fill)
-                .height(Length::FillPortion(3)),
-            container(self.render_problems_panel())
-                .width(Length::Fill)
-                .height(Length::FillPortion(1)),
-        ]
-    }
-
-    fn render_problems_panel(&self) -> iced::widget::Column<'static, Message> {
-        if self.backend.source.is_none() || self.selected.is_none() {
-            return column![];
-        }
-        let selected_path = self.selected.as_ref().unwrap();
-        let entry = self.backend.file_tree.find(selected_path);
-        if entry.is_none() {
-            return column![];
-        }
-        let entry = entry.unwrap();
-
-        let problems = match entry {
-            FsEntry::FsFile(_) => BTreeSet::<Problem>::new(),
-            FsEntry::FsDirectory(_) => BTreeSet::<Problem>::new(),
-            FsEntry::FsMusicFile(mf) => mf.find_problems(),
-        };
-
-        if problems.is_empty() {
-            return column![];
-        }
-
-        let column = problems.iter().fold(Column::new().spacing(4), |col, p| {
-            col.push(text(p.to_string()).size(16))
-        });
-
-        return column;
-    }
-
-    fn render_actions_panel(&self) -> iced::widget::Column<'static, Message> {
-        if self.backend.source.is_none() || self.selected.is_none() {
-            return column![];
-        }
-
-        let selected_path = self.selected.as_ref().unwrap();
-        let entry = self.backend.file_tree.find(selected_path);
-        if entry.is_none() {
-            return column![];
-        }
-        let entry = entry.unwrap();
-
-        let actions = self.backend.get_suitable_actions(entry);
-
-        let column = actions.iter().fold(Column::new().spacing(4), |col, a| {
-            col.push(
-                button(text(a.to_string()).size(16))
-                    .on_press(action_to_message(a, self.selected.clone().unwrap())),
-            )
-        });
-
-        column
-    }
-
-    fn render_file_panel(&self) -> iced::widget::Container<'static, Message> {
-        if self.backend.source.is_none() || self.selected.is_none() {
-            return container(text("No file selected"));
-        }
-
-        let entry = self
-            .backend
-            .file_tree
-            .find(&self.selected.as_ref().unwrap());
-        if entry.is_none() {
-            return container(text("File not found"));
-        }
-        let entry = entry.unwrap();
-
-        match entry {
-            FsEntry::FsFile(f) => {
-                return container(text(f.relative_path.display()).size(16))
-                    .width(Length::Fill)
-                    .height(Length::FillPortion(1))
-                    .align_x(alignment::Horizontal::Left)
-                    .align_y(alignment::Vertical::Top)
-                    .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})));
+        let label = match node {
+            FsEntry::FsFile(_) => name,
+            FsEntry::FsMusicFile(f) => {
+                let prefix = if f.sync_data.synced { "" } else { "* " };
+                format!("{prefix}{name}")
             }
             FsEntry::FsDirectory(d) => {
-                return container(text(d.relative_path.display()).size(16))
-                    .width(Length::Fill)
-                    .height(Length::FillPortion(1))
-                    .align_x(alignment::Horizontal::Left)
-                    .align_y(alignment::Vertical::Top)
-                    .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})));
+                let prefix = if backend.is_dir_synced(d) { "" } else { "* " };
+                format!("{prefix}{name}")
             }
-            FsEntry::FsMusicFile(mf) => {
-                let tags = mf.tags();
+        };
 
-                container(column!(
-                    text(tags.artist).size(16),
-                    text(tags.album).size(16),
-                    text(tags.title).size(16)
-                ))
-                .width(Length::Fill)
-                .height(Length::FillPortion(1))
-                .align_x(alignment::Horizontal::Left)
-                .align_y(alignment::Vertical::Top)
-                .style(iced::theme::Container::Custom(Box::new(InfoPanelStyle {})))
+        out.push(TreeRow {
+            label: label.into(),
+            indent,
+            path: rel_path.to_string_lossy().into_owned().into(),
+        });
+
+        if let FsEntry::FsDirectory(d) = node {
+            if d.expanded {
+                flatten_tree(backend, &d.children, indent + 1, out);
             }
         }
-    }
-
-    fn render_tree(
-        &self,
-        nodes: &BTreeMap<PathBuf, FsEntry>,
-        indent: usize,
-    ) -> iced::widget::Column<'_, Message> {
-        let mut col = column!().spacing(4);
-
-        for (_, node) in nodes {
-            let rel_path = node.rel_path();
-            let label = rel_path.file_name().unwrap().to_string_lossy().to_string();
-
-            let button = match node {
-                FsEntry::FsFile(f) => {
-                    button(text(label)).on_press(Message::SelectFile(f.relative_path.clone()))
-                }
-                FsEntry::FsMusicFile(f) => {
-                    let style = ButtonStyle {
-                        selected: self.selected == Some(f.relative_path.clone()),
-                        has_problem: f.has_problems(),
-                        intention: f.sync_data.intention.clone(),
-                    };
-                    let prefix = if f.sync_data.synced { "" } else { "* " };
-                    let label = format!("{}{}", prefix, label);
-
-                    button(text(label))
-                        .on_press(Message::SelectFile(f.relative_path.clone()))
-                        .style(iced::theme::Button::Custom(Box::new(style)))
-                }
-                FsEntry::FsDirectory(d) => {
-                    let synced = self.backend.is_dir_synced(d);
-                    let style = ButtonStyle {
-                        selected: self.selected == Some(d.relative_path.clone()),
-                        has_problem: d.has_problems(),
-                        intention: d.intention(),
-                    };
-
-                    let prefix = if synced { "" } else { "* " };
-                    let label = format!("{}{}", prefix, label);
-
-                    button(text(label))
-                        .on_press(Message::ToggleDir(d.relative_path.clone()))
-                        .style(iced::theme::Button::Custom(Box::new(style)))
-                }
-            };
-
-            col = col.push(container(button).padding([0, 0, 0, (indent as u16) * 16]));
-
-            match node {
-                FsEntry::FsDirectory(d) => {
-                    if d.expanded {
-                        col = col.push(self.render_tree(&d.children, indent + 1));
-                    }
-                }
-                _ => {}
-            };
-        }
-
-        col
-    }
-
-    fn progress_window(progress: f32) -> Element<'static, Message> {
-        container(
-            column![
-                text("Processing…"),
-                progress_bar(0.0..=1.0, progress).width(Length::Fill),
-            ]
-            .spacing(16)
-            .align_items(Alignment::Center),
-        )
-        .padding(20)
-        // .width(300)
-        // .style(|_| iced::theme::Container::Box)
-        .into()
     }
 }
 
-async fn load_root_dir(root_path: PathBuf, target_rel_path: PathBuf) -> HashSet<PathBuf> {
-    println!("Scanning source dir");
-    crate::file_tree::load_dir_hash_set_files_only(root_path, target_rel_path)
+/// Build the info lines, problem list and action buttons for the selected entry.
+fn build_panels(
+    backend: &Dissonance,
+    selected: &Option<PathBuf>,
+) -> (Vec<TextRow>, Vec<TextRow>, Vec<ActionRow>) {
+    let mut info = Vec::new();
+    let mut problems = Vec::new();
+    let mut actions = Vec::new();
+
+    if backend.source.is_none() || selected.is_none() {
+        info.push(TextRow {
+            text: "No file selected".into(),
+        });
+        return (info, problems, actions);
+    }
+
+    let selected = selected.as_ref().unwrap();
+    let entry = match backend.file_tree.find(selected) {
+        Some(entry) => entry,
+        None => {
+            info.push(TextRow {
+                text: "File not found".into(),
+            });
+            return (info, problems, actions);
+        }
+    };
+
+    match entry {
+        FsEntry::FsFile(f) => info.push(TextRow {
+            text: f.relative_path.display().to_string().into(),
+        }),
+        FsEntry::FsDirectory(d) => info.push(TextRow {
+            text: d.relative_path.display().to_string().into(),
+        }),
+        FsEntry::FsMusicFile(mf) => {
+            let tags = mf.tags();
+            info.push(TextRow {
+                text: tags.artist.into(),
+            });
+            info.push(TextRow {
+                text: tags.album.into(),
+            });
+            info.push(TextRow {
+                text: tags.title.into(),
+            });
+        }
+    }
+
+    if let FsEntry::FsMusicFile(mf) = entry {
+        for problem in mf.find_problems() {
+            problems.push(TextRow {
+                text: problem.to_string().into(),
+            });
+        }
+    }
+
+    for action in backend.get_suitable_actions(entry) {
+        actions.push(ActionRow {
+            label: action.to_string().into(),
+            action: action.to_string().into(),
+        });
+    }
+
+    (info, problems, actions)
 }

@@ -1,0 +1,129 @@
+import { Button, LineEdit, ListView, VerticalBox, HorizontalBox, ProgressIndicator } from "std-widgets.slint";
+
+export struct TreeRow {
+    label: string,
+    indent: int,
+    path: string,
+}
+
+export struct TextRow {
+    text: string,
+}
+
+export struct ActionRow {
+    label: string,
+    action: string,
+}
+
+export component AppWindow inherits Window {
+    title: "Dissonance";
+    preferred-width: 900px;
+    preferred-height: 600px;
+
+    // Rust <-> UI state
+    in-out property <string> source;
+    in-out property <string> destination;
+
+    in property <[TreeRow]> tree;
+    in property <[TextRow]> info-lines;
+    in property <[TextRow]> problems;
+    in property <[ActionRow]> actions;
+
+    in property <bool> show-progress;
+    in property <float> progress;
+
+    // UI -> Rust
+    callback source-accepted();
+    callback destination-accepted();
+    callback start-sync();
+    callback start-index();
+    callback row-clicked(string);
+    callback action-clicked(string);
+
+    // Main view
+    if !root.show-progress: VerticalBox {
+        // Top panel: source / destination inputs + Sync / Index buttons
+        VerticalLayout {
+            spacing: 4px;
+            LineEdit {
+                placeholder-text: "Source...";
+                text <=> root.source;
+                accepted => { root.source-accepted(); }
+            }
+            LineEdit {
+                placeholder-text: "Destination...";
+                text <=> root.destination;
+                accepted => { root.destination-accepted(); }
+            }
+            HorizontalLayout {
+                spacing: 4px;
+                Button {
+                    text: "Sync";
+                    clicked => { root.start-sync(); }
+                }
+                Button {
+                    text: "Index";
+                    clicked => { root.start-index(); }
+                }
+                Rectangle {}
+            }
+        }
+
+        // Main panel: tree | info + problems | actions
+        HorizontalBox {
+            // File tree
+            ListView {
+                horizontal-stretch: 2;
+                for row in root.tree: HorizontalLayout {
+                    Rectangle { width: row.indent * 16px; }
+                    Button {
+                        text: row.label;
+                        clicked => { root.row-clicked(row.path); }
+                    }
+                    Rectangle {}
+                }
+            }
+
+            // Info + problems
+            VerticalLayout {
+                horizontal-stretch: 4;
+                spacing: 8px;
+                ListView {
+                    vertical-stretch: 3;
+                    for line in root.info-lines: Text {
+                        text: line.text;
+                    }
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    for p in root.problems: Text {
+                        text: p.text;
+                    }
+                }
+            }
+
+            // Actions
+            ListView {
+                horizontal-stretch: 1;
+                for a in root.actions: HorizontalLayout {
+                    Button {
+                        text: a.label;
+                        clicked => { root.action-clicked(a.action); }
+                    }
+                }
+            }
+        }
+    }
+
+    // Progress view (swaps out the main view during a sync)
+    if root.show-progress: VerticalBox {
+        alignment: center;
+        Text {
+            text: "Processing…";
+            horizontal-alignment: center;
+        }
+        ProgressIndicator {
+            progress: root.progress;
+        }
+    }
+}
