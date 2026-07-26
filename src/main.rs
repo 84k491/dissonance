@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use slint::{ModelRc, VecModel};
+use slint::{Color, ModelRc, VecModel};
 
 pub(crate) use crate::dissonance::{Problem, SyncIntention, SyncedEntry};
 pub(crate) use crate::file_tree::FsEntry;
@@ -207,7 +207,7 @@ fn main() -> Result<(), slint::PlatformError> {
 /// Recompute every UI-exposed model from the current backend state.
 fn refresh(ui: &AppWindow, backend: &Dissonance, selected: &Option<PathBuf>) {
     let mut tree_rows = Vec::new();
-    flatten_tree(backend, &backend.file_tree.entries, 0, &mut tree_rows);
+    flatten_tree(backend, &backend.file_tree.entries, 0, selected, &mut tree_rows);
     ui.set_tree(ModelRc::new(VecModel::from(tree_rows)));
 
     let (info, problems, actions) = build_panels(backend, selected);
@@ -222,21 +222,31 @@ fn flatten_tree(
     backend: &Dissonance,
     nodes: &BTreeMap<PathBuf, FsEntry>,
     indent: i32,
+    selected: &Option<PathBuf>,
     out: &mut Vec<TreeRow>,
 ) {
     for node in nodes.values() {
         let rel_path = node.rel_path();
         let name = rel_path.file_name().unwrap().to_string_lossy().into_owned();
+        let is_selected = selected.as_ref() == Some(rel_path);
 
-        let label = match node {
-            FsEntry::FsFile(_) => name,
+        let (label, bg, text_color) = match node {
+            FsEntry::FsFile(_) => (name, Color::from_argb_u8(0, 0, 0, 0), problem_color(false)),
             FsEntry::FsMusicFile(f) => {
                 let prefix = if f.sync_data.synced { "" } else { "* " };
-                format!("{prefix}{name}")
+                (
+                    format!("{prefix}{name}"),
+                    intention_color(f.sync_data.intention.clone(), is_selected),
+                    problem_color(f.has_problems()),
+                )
             }
             FsEntry::FsDirectory(d) => {
                 let prefix = if backend.is_dir_synced(d) { "" } else { "* " };
-                format!("{prefix}{name}")
+                (
+                    format!("{prefix}{name}"),
+                    intention_color(d.intention(), is_selected),
+                    problem_color(d.has_problems()),
+                )
             }
         };
 
@@ -244,13 +254,39 @@ fn flatten_tree(
             label: label.into(),
             indent,
             path: rel_path.to_string_lossy().into_owned().into(),
+            bg,
+            text_color,
         });
 
         if let FsEntry::FsDirectory(d) = node {
             if d.expanded {
-                flatten_tree(backend, &d.children, indent + 1, out);
+                flatten_tree(backend, &d.children, indent + 1, selected, out);
             }
         }
+    }
+}
+
+/// Background tint for a tree row, derived from its sync intention. Selected
+/// rows are darkened. Mirrors the old iced `ButtonStyle`.
+fn intention_color(intention: SyncIntention, selected: bool) -> Color {
+    let coef = if selected { 0.7 } else { 1.0 };
+    let (r, g, b) = match intention {
+        SyncIntention::KeepSync => (0.83, 0.89, 1.0),
+        SyncIntention::ForceSync => (0.53, 0.49, 1.0),
+        SyncIntention::DropSync => (0.97, 0.84, 0.85),
+        SyncIntention::Unspecified => (1.0, 0.9, 0.7),
+        SyncIntention::MixedDir => (0.9, 0.85, 0.94),
+    };
+    let to_u8 = |v: f32| (v * coef * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color::from_rgb_u8(to_u8(r), to_u8(g), to_u8(b))
+}
+
+/// Text color for a tree row: red when the entry has problems, else black.
+fn problem_color(has_problem: bool) -> Color {
+    if has_problem {
+        Color::from_rgb_u8(230, 26, 26)
+    } else {
+        Color::from_rgb_u8(0, 0, 0)
     }
 }
 

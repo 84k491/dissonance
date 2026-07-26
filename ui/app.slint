@@ -4,6 +4,8 @@ export struct TreeRow {
     label: string,
     indent: int,
     path: string,
+    bg: color,
+    text-color: color,
 }
 
 export struct TextRow {
@@ -75,10 +77,21 @@ export component AppWindow inherits Window {
             ListView {
                 horizontal-stretch: 2;
                 for row in root.tree: HorizontalLayout {
-                    Rectangle { width: row.indent * 16px; }
-                    Button {
-                        text: row.label;
-                        clicked => { root.row-clicked(row.path); }
+                    padding-left: row.indent * 16px;
+                    Rectangle {
+                        background: row.bg;
+                        horizontal-stretch: 0;
+                        HorizontalLayout {
+                            padding: 2px;
+                            TouchArea {
+                                clicked => { root.row-clicked(row.path); }
+                                Text {
+                                    text: row.label;
+                                    color: row.text-color;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
                     }
                     Rectangle {}
                 }
