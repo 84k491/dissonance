@@ -169,7 +169,7 @@ impl Directory {
         self.children.get(&right_part?)
     }
 
-    pub fn find_recursive_mut(&mut self, rel_path: &Path) -> Option<&mut FsEntry> {
+    fn find_recursive_mut(&mut self, rel_path: &Path) -> Option<&mut FsEntry> {
         let (parent, right_part) = detach_root_parent(rel_path);
 
         if let Some(parent) = parent {
@@ -320,11 +320,7 @@ impl Directory {
     }
 }
 
-// A directory that only contains 'MusicFiles' children
-struct AlbumDirectory {
-    dir: Directory,
-}
-
+// All those impementations are recursive
 impl FsEntryTrait for Directory {
     fn set_sync_info(&mut self, s_data: SyncedEntry) {
         for (_, child) in &mut self.children {
