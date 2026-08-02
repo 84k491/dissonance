@@ -1,19 +1,22 @@
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex},
     thread,
 };
 
-use slint::{Color, ModelRc, VecModel};
+use slint::{Color, ModelRc, VecModel, Weak};
 
 pub(crate) use crate::dissonance::{Problem, SyncIntention, SyncedEntry};
 pub(crate) use crate::file_tree::FsEntry;
 
 use crate::{
-    dissonance::{Dissonance, load_saved_state, process_filesystem_action},
+    dissonance::{
+        Dissonance, FilesystemAction, FilesystemActionReport, load_saved_state,
+        process_filesystem_action,
+    },
     file_tree::load_dir_hash_set_files_only,
     music_file::FsEntryTrait,
 };
@@ -24,6 +27,9 @@ mod music_file;
 mod tags;
 
 slint::include_modules!();
+
+type Backend = Arc<Mutex<Dissonance>>;
+type Selected = Arc<Mutex<Option<PathBuf>>>;
 
 fn main() -> Result<(), slint::PlatformError> {
     let saved_state = load_saved_state();
@@ -50,180 +56,33 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_destination(dest_str.into());
 
     // Source / destination submitted (Enter pressed)
-    ui.on_source_accepted({
-        let weak = ui.as_weak();
-        let backend = backend.clone();
-        move || {
-            let ui = weak.upgrade().unwrap();
-            let path = PathBuf::from(ui.get_source().to_string());
-            if path.exists() && path.is_dir() {
-                backend.lock().unwrap().set_source(path);
-            }
-        }
-    });
+    ui.on_source_accepted(on_source_accepted(ui.as_weak(), backend.clone()));
+    ui.on_destination_accepted(on_destination_accepted(ui.as_weak(), backend.clone()));
 
-    ui.on_destination_accepted({
-        let weak = ui.as_weak();
-        let backend = backend.clone();
-        move || {
-            let ui = weak.upgrade().unwrap();
-            let path = PathBuf::from(ui.get_destination().to_string());
-            if path.exists() && path.is_dir() {
-                backend.lock().unwrap().set_destination(path);
-            }
-        }
-    });
+    ui.on_start_index(on_start_index(
+        ui.as_weak(),
+        backend.clone(),
+        selected.clone(),
+    ));
 
-    // Index: scan the source directory on a background thread, then rebuild the tree.
-    ui.on_start_index({
-        let weak = ui.as_weak();
-        let backend = backend.clone();
-        let selected = selected.clone();
-        move || {
-            let source = { backend.lock().unwrap().source.clone() };
-            let Some(source) = source else {
-                return;
-            };
-            let weak = weak.clone();
-            let backend = backend.clone();
-            let selected = selected.clone();
-            thread::spawn(move || {
-                let nodes = load_dir_hash_set_files_only(source.clone(), source.clone());
-                weak.upgrade_in_event_loop(move |ui| {
-                    let mut b = backend.lock().unwrap();
-                    b.handle_root_loaded(nodes);
-                    let s = selected.lock().unwrap();
-                    refresh(&ui, &b, &s);
-                })
-                .ok();
-            });
-        }
-    });
+    ui.on_start_sync(on_start_sync(
+        ui.as_weak(),
+        backend.clone(),
+        selected.clone(),
+        progress_window.clone(),
+    ));
 
-    // Sync: build the filesystem actions, open a separate progress window, then
-    // apply the actions on a background thread, reporting progress to that window
-    // and refreshing the main window as each file completes. The progress window
-    // stays open until the user closes it.
-    ui.on_start_sync({
-        let weak = ui.as_weak();
-        let backend = backend.clone();
-        let selected = selected.clone();
-        let progress_window = progress_window.clone();
-        move || {
-            let actions = {
-                let mut b = backend.lock().unwrap();
-                b.sync_with_destination();
-                b.filesystem_actions.clone()
-            };
-            if actions.is_empty() {
-                return;
-            }
+    ui.on_row_clicked(on_row_clicked(
+        ui.as_weak(),
+        backend.clone(),
+        selected.clone(),
+    ));
 
-            // Open a fresh progress window, replacing (and dropping) any previous one.
-            let pw = match ProgressWindow::new() {
-                Ok(pw) => pw,
-                Err(_) => return,
-            };
-            pw.set_progress(0.0);
-            pw.set_done(false);
-            {
-                let pw_weak = pw.as_weak();
-                pw.on_close_window(move || {
-                    if let Some(pw) = pw_weak.upgrade() {
-                        let _ = pw.hide();
-                    }
-                });
-            }
-            let _ = pw.show();
-            let pw_weak = pw.as_weak();
-            *progress_window.borrow_mut() = Some(pw);
-
-            let app_weak = weak.clone();
-            let backend = backend.clone();
-            let selected = selected.clone();
-            thread::spawn(move || {
-                let total = actions.len();
-                for (i, action) in actions.iter().enumerate() {
-                    let report = process_filesystem_action(action, i, total);
-                    let backend = backend.clone();
-                    let selected = selected.clone();
-                    let app_weak = app_weak.clone();
-                    let pw_weak = pw_weak.clone();
-                    slint::invoke_from_event_loop(move || {
-                        let mut b = backend.lock().unwrap();
-                        b.handle_filesystem_action_done(&report);
-                        {
-                            let s = selected.lock().unwrap();
-                            if let Some(app) = app_weak.upgrade() {
-                                refresh(&app, &b, &s);
-                            }
-                        }
-                        drop(b);
-
-                        if let Some(pw) = pw_weak.upgrade() {
-                            let processed = report.iter + 1;
-                            pw.set_progress(processed as f32 / report.total_size as f32);
-                            pw.set_done(processed == report.total_size);
-                        }
-                    })
-                    .ok();
-                }
-            });
-        }
-    });
-
-    // Tree row clicked: toggle a directory, or select any entry.
-    ui.on_row_clicked({
-        let weak = ui.as_weak();
-        let backend = backend.clone();
-        let selected = selected.clone();
-        move |path| {
-            let ui = weak.upgrade().unwrap();
-            let path = PathBuf::from(path.to_string());
-            let mut b = backend.lock().unwrap();
-            let is_dir = matches!(b.file_tree.find(&path), Some(FsEntry::FsDirectory(_)));
-            if is_dir {
-                b.file_tree.toggle_dir(&path);
-            }
-            let mut s = selected.lock().unwrap();
-            *s = Some(path);
-            refresh(&ui, &b, &s);
-        }
-    });
-
-    // Action button clicked: apply it to the currently selected entry.
-    ui.on_action_clicked({
-        let weak = ui.as_weak();
-        let backend = backend.clone();
-        let selected = selected.clone();
-        move |action| {
-            let ui = weak.upgrade().unwrap();
-            let path = { selected.lock().unwrap().clone() };
-            let Some(path) = path else {
-                return;
-            };
-            let mut b = backend.lock().unwrap();
-            match action.as_str() {
-                "FixTags" => b.fix_tags(path),
-                "RemoveTags" => b.remove_tags(path),
-                "MoveFile" => {
-                    let new_path = b.move_entry_to_tag_based_path(path);
-                    *selected.lock().unwrap() = new_path;
-                }
-                "DeleteEntry" => b.delete_entry(path),
-                "FixCharacters" => {
-                    let new_path = b.fix_characters(&path);
-                    *selected.lock().unwrap() = new_path;
-                }
-                "ForceSync" => b.set_sync_intention(path, SyncIntention::ForceSync),
-                "KeepSync" => b.set_sync_intention(path, SyncIntention::KeepSync),
-                "DropSync" => b.set_sync_intention(path, SyncIntention::DropSync),
-                _ => {}
-            }
-            let s = selected.lock().unwrap();
-            refresh(&ui, &b, &s);
-        }
-    });
+    ui.on_action_clicked(on_action_clicked(
+        ui.as_weak(),
+        backend.clone(),
+        selected.clone(),
+    ));
 
     // Initial paint.
     {
@@ -235,10 +94,229 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.run()
 }
 
+/// Store the source directory typed into the main window, if it exists.
+fn on_source_accepted(weak: Weak<AppWindow>, backend: Backend) -> impl FnMut() + 'static {
+    move || {
+        let ui = weak.upgrade().unwrap();
+        let path = PathBuf::from(ui.get_source().to_string());
+        if path.exists() && path.is_dir() {
+            backend.lock().unwrap().set_source(path);
+        }
+    }
+}
+
+/// Store the destination directory typed into the main window, if it exists.
+fn on_destination_accepted(weak: Weak<AppWindow>, backend: Backend) -> impl FnMut() + 'static {
+    move || {
+        let ui = weak.upgrade().unwrap();
+        let path = PathBuf::from(ui.get_destination().to_string());
+        if path.exists() && path.is_dir() {
+            backend.lock().unwrap().set_destination(path);
+        }
+    }
+}
+
+/// Index: scan the source directory on a background thread, then rebuild the tree.
+fn on_start_index(
+    weak: Weak<AppWindow>,
+    backend: Backend,
+    selected: Selected,
+) -> impl FnMut() + 'static {
+    move || {
+        let source = { backend.lock().unwrap().source.clone() };
+        let Some(source) = source else {
+            return;
+        };
+        let weak = weak.clone();
+        let backend = backend.clone();
+        let selected = selected.clone();
+        thread::spawn(move || scan_source(source, weak, backend, selected));
+    }
+}
+
+/// Background half of the indexing: walk the source tree, then hand the result
+/// back to the UI thread.
+fn scan_source(source: PathBuf, weak: Weak<AppWindow>, backend: Backend, selected: Selected) {
+    let nodes = load_dir_hash_set_files_only(source.clone(), source);
+    weak.upgrade_in_event_loop(move |ui| apply_scanned_source(ui, nodes, backend, selected))
+        .ok();
+}
+
+/// UI-thread half of the indexing: adopt the scanned nodes and repaint.
+fn apply_scanned_source(
+    ui: AppWindow,
+    nodes: HashSet<PathBuf>,
+    backend: Backend,
+    selected: Selected,
+) {
+    let mut b = backend.lock().unwrap();
+    b.handle_root_loaded(nodes);
+    let s = selected.lock().unwrap();
+    refresh(&ui, &b, &s);
+}
+
+/// Sync: build the filesystem actions, open a separate progress window, then
+/// apply the actions on a background thread, reporting progress to that window
+/// and refreshing the main window as each file completes. The progress window
+/// stays open until the user closes it.
+fn on_start_sync(
+    weak: Weak<AppWindow>,
+    backend: Backend,
+    selected: Selected,
+    progress_window: Rc<RefCell<Option<ProgressWindow>>>,
+) -> impl FnMut() + 'static {
+    move || {
+        let actions = {
+            let mut b = backend.lock().unwrap();
+            b.sync_with_destination();
+            b.filesystem_actions.clone()
+        };
+        if actions.is_empty() {
+            return;
+        }
+
+        // Open a fresh progress window, replacing (and dropping) any previous one.
+        let pw = match ProgressWindow::new() {
+            Ok(pw) => pw,
+            Err(_) => return,
+        };
+        pw.set_progress(0.0);
+        pw.set_done(false);
+        pw.on_close_window(on_close_progress_window(pw.as_weak()));
+        let _ = pw.show();
+        let pw_weak = pw.as_weak();
+        *progress_window.borrow_mut() = Some(pw);
+
+        let app_weak = weak.clone();
+        let backend = backend.clone();
+        let selected = selected.clone();
+        thread::spawn(move || apply_actions(actions, app_weak, pw_weak, backend, selected));
+    }
+}
+
+/// Hide the progress window when its close button is pressed.
+fn on_close_progress_window(pw_weak: Weak<ProgressWindow>) -> impl FnMut() + 'static {
+    move || {
+        if let Some(pw) = pw_weak.upgrade() {
+            let _ = pw.hide();
+        }
+    }
+}
+
+/// Background half of the sync: run every filesystem action, reporting each one
+/// back to the UI thread as it completes.
+fn apply_actions(
+    actions: Vec<FilesystemAction>,
+    app_weak: Weak<AppWindow>,
+    pw_weak: Weak<ProgressWindow>,
+    backend: Backend,
+    selected: Selected,
+) {
+    let total = actions.len();
+    for (i, action) in actions.iter().enumerate() {
+        let report = process_filesystem_action(action, i, total);
+        let backend = backend.clone();
+        let selected = selected.clone();
+        let app_weak = app_weak.clone();
+        let pw_weak = pw_weak.clone();
+        slint::invoke_from_event_loop(move || {
+            report_action_done(report, app_weak, pw_weak, backend, selected)
+        })
+        .ok();
+    }
+}
+
+/// UI-thread half of the sync: adopt one action's result, repaint the main
+/// window and advance the progress bar.
+fn report_action_done(
+    report: FilesystemActionReport,
+    app_weak: Weak<AppWindow>,
+    pw_weak: Weak<ProgressWindow>,
+    backend: Backend,
+    selected: Selected,
+) {
+    let mut b = backend.lock().unwrap();
+    b.handle_filesystem_action_done(&report);
+    {
+        let s = selected.lock().unwrap();
+        if let Some(app) = app_weak.upgrade() {
+            refresh(&app, &b, &s);
+        }
+    }
+    drop(b);
+
+    if let Some(pw) = pw_weak.upgrade() {
+        let processed = report.iter + 1;
+        pw.set_progress(processed as f32 / report.total_size as f32);
+        pw.set_done(processed == report.total_size);
+    }
+}
+
+/// Tree row clicked: toggle a directory, or select any entry.
+fn on_row_clicked(
+    weak: Weak<AppWindow>,
+    backend: Backend,
+    selected: Selected,
+) -> impl FnMut(slint::SharedString) + 'static {
+    move |path| {
+        let ui = weak.upgrade().unwrap();
+        let path = PathBuf::from(path.to_string());
+        let mut b = backend.lock().unwrap();
+        let is_dir = matches!(b.file_tree.find(&path), Some(FsEntry::FsDirectory(_)));
+        if is_dir {
+            b.file_tree.toggle_dir(&path);
+        }
+        let mut s = selected.lock().unwrap();
+        *s = Some(path);
+        refresh(&ui, &b, &s);
+    }
+}
+
+/// Action button clicked: apply it to the currently selected entry.
+fn on_action_clicked(
+    weak: Weak<AppWindow>,
+    backend: Backend,
+    selected: Selected,
+) -> impl FnMut(slint::SharedString) + 'static {
+    move |action| {
+        let ui = weak.upgrade().unwrap();
+        let path = { selected.lock().unwrap().clone() };
+        let Some(path) = path else {
+            return;
+        };
+        let mut b = backend.lock().unwrap();
+        match action.as_str() {
+            "FixTags" => b.fix_tags(path),
+            "RemoveTags" => b.remove_tags(path),
+            "MoveFile" => {
+                let new_path = b.move_entry_to_tag_based_path(path);
+                *selected.lock().unwrap() = new_path;
+            }
+            "DeleteEntry" => b.delete_entry(path),
+            "FixCharacters" => {
+                let new_path = b.fix_characters(&path);
+                *selected.lock().unwrap() = new_path;
+            }
+            "ForceSync" => b.set_sync_intention(path, SyncIntention::ForceSync),
+            "KeepSync" => b.set_sync_intention(path, SyncIntention::KeepSync),
+            "DropSync" => b.set_sync_intention(path, SyncIntention::DropSync),
+            _ => {}
+        }
+        let s = selected.lock().unwrap();
+        refresh(&ui, &b, &s);
+    }
+}
+
 /// Recompute every UI-exposed model from the current backend state.
 fn refresh(ui: &AppWindow, backend: &Dissonance, selected: &Option<PathBuf>) {
     let mut tree_rows = Vec::new();
-    flatten_tree(backend, &backend.file_tree.entries, 0, selected, &mut tree_rows);
+    flatten_tree(
+        backend,
+        &backend.file_tree.entries,
+        0,
+        selected,
+        &mut tree_rows,
+    );
     ui.set_tree(ModelRc::new(VecModel::from(tree_rows)));
 
     let (info, problems, actions) = build_panels(backend, selected);
