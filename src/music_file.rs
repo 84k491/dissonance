@@ -402,8 +402,11 @@ impl FsEntryTrait for MusicFile {
 pub struct Directory {
     pub base_path: PathBuf,
     pub relative_path: PathBuf,
-    pub children: BTreeMap<PathBuf, FsEntry>, // filename(not path) to object
-    pub expanded: bool,                       // TODO this is from view, not from model, move it
+
+    // object filename (not path)
+    children: BTreeMap<PathBuf, FsEntry>,
+
+    pub expanded: bool, // TODO this is from view, not from model, move it
 }
 impl Directory {
     pub fn new(
@@ -418,6 +421,14 @@ impl Directory {
             expanded: false,
         };
         ret
+    }
+
+    pub fn children(&self) -> &BTreeMap<PathBuf, FsEntry> {
+        &self.children
+    }
+
+    pub fn children_mut(&mut self) -> &mut BTreeMap<PathBuf, FsEntry> {
+        &mut self.children
     }
 
     pub fn children_recursive(&self) -> Vec<PathBuf> {
@@ -478,6 +489,11 @@ impl Directory {
             })
             .all(|v| v)
     }
+}
+
+// A directory that only contains 'MusicFiles' children
+struct AlbumDirectory {
+    dir: Directory,
 }
 
 impl FsEntryTrait for Directory {

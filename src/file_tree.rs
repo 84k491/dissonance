@@ -80,7 +80,7 @@ impl FileTree {
                     map.insert(mf.relative_path.clone(), mf.sync_data.clone());
                 }
                 FsEntry::FsDirectory(d) => {
-                    let sub_index = Self::do_create_index(&d.children);
+                    let sub_index = Self::do_create_index(d.children());
                     map.extend(sub_index);
                 }
                 _ => {}
@@ -193,7 +193,7 @@ impl FileTree {
                     }
 
                     // recurse in
-                    return Self::find_entry(&d.children, right_part.as_path());
+                    return Self::find_entry(d.children(), right_part.as_path());
                 }
 
                 // searching only directories if parent exists
@@ -269,7 +269,7 @@ impl FileTree {
             match entry.1 {
                 FsEntry::FsDirectory(d) => {
                     // recurse in
-                    return Self::find_entry_mut(&mut d.children, right_part.as_path());
+                    return Self::find_entry_mut(d.children_mut(), right_part.as_path());
                 }
 
                 // searching only directories if parent exists
@@ -345,7 +345,7 @@ impl FileTree {
             match root_entry.1 {
                 FsEntry::FsDirectory(d) => {
                     // recurse in
-                    return Self::do_remove_entry(&mut d.children, &right_part);
+                    return Self::do_remove_entry(d.children_mut(), &right_part);
                 }
 
                 // searching only directories if parent exists
@@ -401,7 +401,7 @@ impl FileTree {
                     _ => {}
                 }
                 let filename = PathBuf::from(entry_rel_path.file_name().unwrap());
-                d.children.insert(filename, entry);
+                d.children_mut().insert(filename, entry);
             }
             _ => {}
         };

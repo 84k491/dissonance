@@ -369,7 +369,7 @@ fn flatten_tree(
 
         if let FsEntry::FsDirectory(d) = node {
             if d.expanded {
-                flatten_tree(backend, &d.children, indent + 1, selected, out);
+                flatten_tree(backend, d.children(), indent + 1, selected, out);
             }
         }
     }

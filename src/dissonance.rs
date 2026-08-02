@@ -257,7 +257,7 @@ impl Dissonance {
     }
 
     pub fn is_dir_synced(&self, dir: &Directory) -> bool {
-        dir.children
+        dir.children()
             .iter()
             .map(|(_, c)| match c {
                 FsEntry::FsFile(_) => false,
@@ -538,7 +538,7 @@ impl Dissonance {
             }
             FsEntry::FsDirectory(d) => {
                 let children: Vec<PathBuf> = d
-                    .children
+                    .children()
                     .iter()
                     .map(|(_, entry)| entry.rel_path().clone())
                     .collect();
@@ -568,7 +568,7 @@ impl Dissonance {
             }
             Some(FsEntry::FsDirectory(d)) => {
                 let children: Vec<PathBuf> = d
-                    .children
+                    .children()
                     .iter()
                     .map(|(_, entry)| entry.rel_path().clone())
                     .collect();
@@ -603,7 +603,7 @@ impl Dissonance {
                 Some(FsEntry::FsMusicFile(mf)) => mf,
                 Some(FsEntry::FsDirectory(d)) => {
                     let children: Vec<PathBuf> = d
-                        .children
+                        .children()
                         .iter()
                         .map(|(_, entry)| entry.rel_path().clone())
                         .collect();
@@ -616,7 +616,7 @@ impl Dissonance {
                     let dir = self.file_tree.find(&dir_path).expect("No dir on moving");
                     match dir {
                         FsEntry::FsDirectory(d) => {
-                            if d.children.is_empty() {
+                            if d.children().is_empty() {
                                 self.file_tree.remove_entry(&dir_path);
                             }
                         }
@@ -684,7 +684,7 @@ impl Dissonance {
             }
             FsEntry::FsDirectory(d) => {
                 let children: Vec<PathBuf> = d
-                    .children
+                    .children()
                     .iter()
                     .map(|(_, entry)| entry.rel_path().clone())
                     .collect();
