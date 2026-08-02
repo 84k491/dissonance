@@ -330,25 +330,34 @@ impl Directory {
     }
 
     pub fn remove_entry_recursive(&mut self, rel_path: &Path) -> bool {
-        let (parent, right_part) = detach_first_component(rel_path);
+        let (root_opt, right_part) = detach_first_component(rel_path);
 
-        if let Some(parent) = parent {
+        if let Some(root) = root_opt {
             let right_part = right_part.expect("detach_first_component contract fail");
 
-            return match self.children.get_mut(&parent) {
+            let removed = match self.children.get_mut(&root) {
                 // recurse in
                 Some(FsEntry::FsDirectory(d)) => d.remove_entry_recursive(&right_part),
 
-                // searching only directories if parent exists
+                // searching only directories if root exists
                 _ => false,
             };
+
+            self.recalc_meta();
+
+            return removed;
         }
 
         // only filename left here, the children are keyed by filename
-        match right_part {
+
+        let removed = match right_part {
             Some(filename) => self.children.remove(&filename).is_some(),
             None => false,
-        }
+        };
+
+        self.recalc_meta();
+
+        return removed;
     }
 
     pub fn toggle_dir_recursive(&mut self, target: &Path) {
