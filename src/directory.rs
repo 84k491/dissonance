@@ -228,16 +228,10 @@ impl Directory {
     }
 
     pub fn find_recursive(&self, rel_path: &Path) -> Option<&FsEntry> {
-        let (parent, right_part) = detach_root_parent(rel_path);
+        let (parent, right_part) = detach_first_component(rel_path);
 
         if let Some(parent) = parent {
-            let right_part = match right_part {
-                Some(r) => r,
-                None => {
-                    println!("ERROR: no right path with parent: {}", rel_path.display());
-                    return None;
-                }
-            };
+            let right_part = right_part.expect("detach_first_component contract fail");
 
             return match self.children.get(&parent) {
                 // recurse in
@@ -253,16 +247,10 @@ impl Directory {
     }
 
     fn find_recursive_mut(&mut self, rel_path: &Path) -> Option<&mut FsEntry> {
-        let (parent, right_part) = detach_root_parent(rel_path);
+        let (parent, right_part) = detach_first_component(rel_path);
 
         if let Some(parent) = parent {
-            let right_part = match right_part {
-                Some(r) => r,
-                None => {
-                    println!("ERROR: no right path with parent: {}", rel_path.display());
-                    return None;
-                }
-            };
+            let right_part = right_part.expect("detach_first_component contract fail");
 
             return match self.children.get_mut(&parent) {
                 // recurse in
@@ -287,19 +275,12 @@ impl Directory {
         }
     }
 
-    // Adds an entry at 'entry_rel_path' (relative to this directory), creating
-    // the missing directories on the way down.
+    // Created missing directories
     pub fn add_entry_recursive(&mut self, entry_rel_path: &Path, sync_info: SyncedEntry) {
-        let (parent, right_part) = detach_root_parent(entry_rel_path);
+        let (root_opt, right_part) = detach_first_component(entry_rel_path);
 
-        if let Some(parent) = parent {
-            let right_part = match right_part {
-                Some(r) => r,
-                None => {
-                    println!("ERROR: no right path with parent: {}", entry_rel_path.display());
-                    return;
-                }
-            };
+        if let Some(parent) = root_opt {
+            let right_part = right_part.expect("detach_first_component contract fail");
 
             // create the missing directory on the way down
             if !self.children.contains_key(&parent) {
@@ -336,19 +317,15 @@ impl Directory {
         }
 
         self.children.insert(filename, entry);
+
+        self.recalc_meta();
     }
 
     pub fn remove_entry_recursive(&mut self, rel_path: &Path) -> bool {
-        let (parent, right_part) = detach_root_parent(rel_path);
+        let (parent, right_part) = detach_first_component(rel_path);
 
         if let Some(parent) = parent {
-            let right_part = match right_part {
-                Some(r) => r,
-                None => {
-                    println!("ERROR: no right path with parent: {}", rel_path.display());
-                    return false;
-                }
-            };
+            let right_part = right_part.expect("detach_first_component contract fail");
 
             return match self.children.get_mut(&parent) {
                 // recurse in
@@ -490,24 +467,34 @@ impl FsEntryTrait for Directory {
 }
 
 // Splits a relative path into its first component and the rest of the path.
-fn detach_root_parent(rel_path: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
-    let parent: PathBuf = rel_path.components().take(1).collect();
-    let right_part: PathBuf = rel_path.components().skip(1).collect();
+//
+// A path with a single component has no first component to detach, so it is
+// returned as the right part alone. All possible outcomes:
+//
+//   ""        -> (None,        None)          // empty path
+//   "a"       -> (None,        Some("a"))     // the only component is not a first
+//   "a/b"     -> (Some("a"),   Some("b"))
+//   "a/b/c"   -> (Some("a"),   Some("b/c"))
+//
+// (Some(_), None) is never returned.
+fn detach_first_component(rel_path: &Path) -> (Option<PathBuf>, Option<PathBuf>) {
+    let first: PathBuf = rel_path.components().take(1).collect();
+    let rest_right_part: PathBuf = rel_path.components().skip(1).collect();
 
-    let parent_opt: Option<PathBuf> = if parent == PathBuf::new() {
+    let parent_opt: Option<PathBuf> = if first == PathBuf::new() {
         None
     } else {
-        Some(parent)
+        Some(first)
     };
 
-    let right_part_opt: Option<PathBuf> = if right_part == PathBuf::new() {
+    let right_part_opt: Option<PathBuf> = if rest_right_part == PathBuf::new() {
         None
     } else {
-        Some(right_part)
+        Some(rest_right_part)
     };
 
     if right_part_opt.is_none() && parent_opt.is_some() {
-        return (None, parent_opt); // the only component is not a parent
+        return (None, parent_opt); // the only component is not a first
     }
 
     return (parent_opt, right_part_opt);
