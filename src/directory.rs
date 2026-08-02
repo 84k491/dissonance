@@ -295,31 +295,33 @@ impl Directory {
             None => return,
         };
 
-        let parent_rel_path = entry_rel_path.parent().unwrap_or(Path::new(""));
-
-        let parent: &mut Directory = if parent_rel_path == Path::new("") {
-            self
-        } else {
-            if self.find_recursive(parent_rel_path).is_none() {
-                self.add_entry_recursive(&parent_rel_path.to_path_buf(), sync_info.clone());
-            }
-
-            match self.find_recursive_mut(parent_rel_path) {
-                Some(FsEntry::FsDirectory(d)) => d,
-                _ => {
-                    println!("ERROR: no parent dir for: {}", entry_rel_path.display());
-                    return;
-                }
-            }
-        };
-
-        let mut entry = FsEntry::from(&parent.base_path.clone(), entry_rel_path);
+        let mut entry = FsEntry::from(&self.base_path.clone(), entry_rel_path);
         match entry {
             FsEntry::FsMusicFile(ref mut mf) => {
-                mf.sync_data = sync_info;
+                mf.sync_data = sync_info.clone();
             }
             _ => {}
         }
+
+        let parent_rel_path_opt = entry_rel_path.parent();
+        if parent_rel_path_opt.is_none() {
+            self.children.insert(filename, entry);
+            return;
+        }
+
+        let parent_rel_path = parent_rel_path_opt.unwrap();
+
+        if self.find_recursive(parent_rel_path).is_none() {
+            self.add_entry_recursive(&parent_rel_path.to_path_buf(), sync_info.clone());
+        }
+
+        let parent = match self.find_recursive_mut(parent_rel_path) {
+            Some(FsEntry::FsDirectory(d)) => d,
+            _ => {
+                println!("ERROR: no parent dir for: {} on add_dir", entry_rel_path.display());
+                return;
+            }
+        };
 
         parent.children.insert(filename, entry);
     }
