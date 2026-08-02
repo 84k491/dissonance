@@ -275,12 +275,12 @@ impl Directory {
         }
     }
 
-    // Created missing directories
+    // Creates missing directories
     pub fn add_entry_recursive(&mut self, entry_rel_path: &Path, sync_info: SyncedEntry) {
-        let (root_opt, right_part) = detach_first_component(entry_rel_path);
+        let (root_opt, right_part_opt) = detach_first_component(entry_rel_path);
 
         if let Some(parent) = root_opt {
-            let right_part = right_part.expect("detach_first_component contract fail");
+            let right_part = right_part_opt.expect("detach_first_component contract fail");
 
             // create the missing directory on the way down
             if !self.children.contains_key(&parent) {
@@ -288,19 +288,27 @@ impl Directory {
                 self.children.insert(parent.clone(), dir);
             }
 
-            return match self.children.get_mut(&parent) {
+            match self.children.get_mut(&parent) {
                 // recurse in
                 Some(FsEntry::FsDirectory(d)) => d.add_entry_recursive(&right_part, sync_info),
 
                 // adding only into directories if parent exists
                 _ => {
-                    println!("ERROR: no parent dir for: {} on add_entry", entry_rel_path.display());
+                    panic!(
+                        "ERROR: no parent dir for: {} on add_entry",
+                        entry_rel_path.display()
+                    );
                 }
             };
+
+            self.recalc_meta();
+
+            return;
         }
 
         // only filename left here, the children are keyed by filename
-        let filename = match right_part {
+
+        let filename = match right_part_opt {
             Some(f) => f,
             None => {
                 println!("ERROR: empty path on add_entry");
