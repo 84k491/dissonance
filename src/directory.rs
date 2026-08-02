@@ -1,6 +1,7 @@
 use crate::{
     Problem, SyncIntention, SyncedEntry,
     music_file::{FsEntryTrait, InvalidFile, MusicFile},
+    tags::tags,
 };
 use pathdiff::diff_paths;
 use std::{
@@ -53,6 +54,23 @@ impl FsEntry {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum DirectoryMetadata {
+    // An unspecified directory. Means all other directory types that don't belong to sets below
+    None,
+
+    // If a directory has this option, than it's an album.
+    // Album contains music files only
+    // All music files must contain the same album metadata
+    AlbumMeta(tags::AlbumMetadata),
+
+    // If a directory has this option, than it's an artist dir.
+    // Artist dir contains albums only
+    // All albums must contain the same artist metadata
+    #[allow(dead_code)]
+    ArtistMeta(tags::ArtistMetadata),
+}
+
 // The root of the tree is a Directory with an empty relative path.
 #[derive(Debug, Clone)]
 pub struct Directory {
@@ -61,6 +79,7 @@ pub struct Directory {
 
     // object filename (not path)
     children: BTreeMap<PathBuf, FsEntry>,
+    meta: DirectoryMetadata,
 
     pub expanded: bool, // TODO this is from view, not from model, move it
 }
@@ -70,13 +89,77 @@ impl Directory {
         relative_path: &PathBuf,
         children: BTreeMap<PathBuf, FsEntry>,
     ) -> Directory {
-        let ret = Directory {
+        let mut ret = Directory {
             base_path: base.clone(),
             relative_path: relative_path.clone(),
             children: children,
+            meta: DirectoryMetadata::None,
             expanded: false,
         };
-        ret
+
+        ret.recalc_meta();
+
+        return ret;
+    }
+
+    #[allow(dead_code)]
+    pub fn meta(&self) -> &DirectoryMetadata {
+        return &self.meta;
+    }
+
+    fn recalc_meta(&mut self) {
+        if let Some(album) = self.common_album_meta() {
+            self.meta = DirectoryMetadata::AlbumMeta(album);
+            return;
+        }
+
+        if let Some(artist) = self.common_artist_meta() {
+            self.meta = DirectoryMetadata::ArtistMeta(artist);
+            return;
+        }
+
+        self.meta = DirectoryMetadata::None;
+    }
+
+    fn common_album_meta(&self) -> Option<tags::AlbumMetadata> {
+        let mut ret: Option<tags::AlbumMetadata> = None;
+
+        for (_, child) in &self.children {
+            let album = match child {
+                FsEntry::FsMusicFile(mf) => tags::AlbumMetadata::get_from_tags(&mf.tags()),
+                _ => return None,
+            };
+
+            match &ret {
+                Some(known) if *known != album => return None,
+                _ => ret = Some(album),
+            }
+        }
+
+        return ret;
+    }
+
+    fn common_artist_meta(&self) -> Option<tags::ArtistMetadata> {
+        let mut ret: Option<tags::ArtistMetadata> = None;
+
+        for (_, child) in &self.children {
+            let artist = match child {
+                FsEntry::FsDirectory(d) => match &d.meta {
+                    DirectoryMetadata::AlbumMeta(album) => {
+                        tags::ArtistMetadata::get_from_album(album)
+                    }
+                    _ => return None,
+                },
+                _ => return None,
+            };
+
+            match &ret {
+                Some(known) if *known != artist => return None,
+                _ => ret = Some(artist),
+            }
+        }
+
+        return ret;
     }
 
     pub fn empty() -> Directory {

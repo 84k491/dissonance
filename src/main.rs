@@ -9,20 +9,20 @@ use std::{
 
 use slint::{Color, ModelRc, VecModel, Weak};
 
-pub(crate) use crate::dissonance::{Problem, SyncIntention, SyncedEntry};
 pub(crate) use crate::directory::FsEntry;
+pub(crate) use crate::dissonance::{Problem, SyncIntention, SyncedEntry};
 
 use crate::{
+    directory::load_dir_hash_set_files_only,
     dissonance::{
         Dissonance, FilesystemAction, FilesystemActionReport, load_saved_state,
         process_filesystem_action,
     },
-    directory::load_dir_hash_set_files_only,
     music_file::FsEntryTrait,
 };
 
-mod dissonance;
 mod directory;
+mod dissonance;
 mod music_file;
 mod tags;
 
@@ -262,7 +262,10 @@ fn on_row_clicked(
         let ui = weak.upgrade().unwrap();
         let path = PathBuf::from(path.to_string());
         let mut b = backend.lock().unwrap();
-        let is_dir = matches!(b.root_dir.find_recursive(&path), Some(FsEntry::FsDirectory(_)));
+        let is_dir = matches!(
+            b.root_dir.find_recursive(&path),
+            Some(FsEntry::FsDirectory(_))
+        );
         if is_dir {
             b.root_dir.toggle_dir_recursive(&path);
         }

@@ -601,7 +601,10 @@ impl Dissonance {
                         self.move_entry_to_tag_based_path(child);
                     }
 
-                    let dir = self.root_dir.find_recursive(&dir_path).expect("No dir on moving");
+                    let dir = self
+                        .root_dir
+                        .find_recursive(&dir_path)
+                        .expect("No dir on moving");
                     match dir {
                         FsEntry::FsDirectory(d) => {
                             if d.children().is_empty() {
@@ -681,7 +684,8 @@ impl Dissonance {
                     self.fix_characters(&child);
                 }
 
-                self.root_dir.remove_entry_recursive(&d.relative_path.clone());
+                self.root_dir
+                    .remove_entry_recursive(&d.relative_path.clone());
                 let _ = remove_empty_subdirs::remove_empty_subdirs(&self.source.clone().unwrap());
                 None
             }
