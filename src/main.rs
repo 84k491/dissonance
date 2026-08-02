@@ -10,19 +10,19 @@ use std::{
 use slint::{Color, ModelRc, VecModel, Weak};
 
 pub(crate) use crate::dissonance::{Problem, SyncIntention, SyncedEntry};
-pub(crate) use crate::file_tree::FsEntry;
+pub(crate) use crate::directory::FsEntry;
 
 use crate::{
     dissonance::{
         Dissonance, FilesystemAction, FilesystemActionReport, load_saved_state,
         process_filesystem_action,
     },
-    file_tree::load_dir_hash_set_files_only,
+    directory::load_dir_hash_set_files_only,
     music_file::FsEntryTrait,
 };
 
 mod dissonance;
-mod file_tree;
+mod directory;
 mod music_file;
 mod tags;
 
@@ -262,9 +262,9 @@ fn on_row_clicked(
         let ui = weak.upgrade().unwrap();
         let path = PathBuf::from(path.to_string());
         let mut b = backend.lock().unwrap();
-        let is_dir = matches!(b.file_tree.find(&path), Some(FsEntry::FsDirectory(_)));
+        let is_dir = matches!(b.root_dir.find_recursive(&path), Some(FsEntry::FsDirectory(_)));
         if is_dir {
-            b.file_tree.toggle_dir(&path);
+            b.root_dir.toggle_dir_recursive(&path);
         }
         let mut s = selected.lock().unwrap();
         *s = Some(path);
@@ -312,7 +312,7 @@ fn refresh(ui: &AppWindow, backend: &Dissonance, selected: &Option<PathBuf>) {
     let mut tree_rows = Vec::new();
     flatten_tree(
         backend,
-        &backend.file_tree.entries,
+        backend.root_dir.children(),
         0,
         selected,
         &mut tree_rows,
@@ -350,7 +350,7 @@ fn flatten_tree(
                 )
             }
             FsEntry::FsDirectory(d) => {
-                let prefix = if backend.is_dir_synced(d) { "" } else { "* " };
+                let prefix = if d.synced() { "" } else { "* " };
                 (
                     format!("{prefix}{name}"),
                     intention_color(d.intention(), is_selected),
@@ -416,7 +416,7 @@ fn build_panels(
     }
 
     let selected = selected.as_ref().unwrap();
-    let entry = match backend.file_tree.find(selected) {
+    let entry = match backend.root_dir.find_recursive(selected) {
         Some(entry) => entry,
         None => {
             info.push(TextRow {

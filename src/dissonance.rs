@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::file_tree::load_dir_hash_set_files_only;
+use crate::directory::load_dir_hash_set_files_only;
 use crate::{
-    file_tree::{FileTree, FsEntry},
-    music_file::{Directory, FsEntryTrait, InvalidFile, MusicFile},
+    directory::{Directory, FsEntry},
+    music_file::{FsEntryTrait, InvalidFile, MusicFile},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -102,7 +102,7 @@ pub struct SyncedEntry {
 }
 
 pub struct Dissonance {
-    pub file_tree: FileTree,
+    pub root_dir: Directory,
     pub source: Option<PathBuf>,
     pub destination: Option<PathBuf>,
     pub destination_files: Option<HashSet<PathBuf>>,
@@ -111,7 +111,7 @@ pub struct Dissonance {
 
 impl Drop for Dissonance {
     fn drop(&mut self) {
-        let index = self.file_tree.create_index();
+        let index = self.root_dir.create_index_recursive();
         Self::save_index(index);
         save_state(self.source.clone(), self.destination.clone());
     }
@@ -120,7 +120,7 @@ impl Drop for Dissonance {
 impl Dissonance {
     pub fn new(saved_state: AppSavedState) -> Self {
         Self {
-            file_tree: FileTree::empty(),
+            root_dir: Directory::empty(),
             source: saved_state.source,
             destination: saved_state.destination,
             destination_files: None,
@@ -138,7 +138,7 @@ impl Dissonance {
 
     pub fn handle_root_loaded(&mut self, nodes: HashSet<PathBuf>) {
         let index = Self::load_index();
-        self.file_tree = FileTree::from(nodes, self.source.clone().unwrap(), index);
+        self.root_dir = Directory::from_paths(nodes, self.source.clone().unwrap(), index);
 
         println!("Source dir loaded");
 
@@ -157,7 +157,7 @@ impl Dissonance {
     pub fn sync_with_destination(&mut self) {
         println!("Syncing with destination");
 
-        let index = self.file_tree.create_index();
+        let index = self.root_dir.create_index_recursive();
         let mut filesystem_actions = Vec::new();
 
         let unsynced: BTreeMap<PathBuf, SyncedEntry> = index
@@ -187,7 +187,7 @@ impl Dissonance {
             .as_ref()
             .unwrap()
             .iter()
-            .filter(|path| self.file_tree.find(path).is_none())
+            .filter(|path| self.root_dir.find_recursive(path).is_none())
             .map(|k| {
                 FilesystemAction::Remove(RemoveFileAction {
                     base_abs: self.destination.clone().unwrap(),
@@ -226,7 +226,7 @@ impl Dissonance {
             FilesystemAction::Copy(copy_action) => {
                 let dfiles = self.destination_files.as_mut().unwrap();
                 dfiles.insert(copy_action.relative.clone());
-                self.file_tree.set_sync_info(
+                self.root_dir.set_sync_info_recursive(
                     &copy_action.relative,
                     SyncedEntry {
                         intention: SyncIntention::KeepSync,
@@ -237,7 +237,7 @@ impl Dissonance {
             FilesystemAction::Remove(remove_action) => {
                 let dfiles = self.destination_files.as_mut().unwrap();
                 dfiles.remove(&remove_action.relative);
-                self.file_tree.set_sync_info(
+                self.root_dir.set_sync_info_recursive(
                     &remove_action.relative,
                     SyncedEntry {
                         intention: SyncIntention::DropSync,
@@ -254,18 +254,6 @@ impl Dissonance {
             FsEntry::FsDirectory(d) => self.get_suitable_actions_for_dir(d),
             FsEntry::FsFile(f) => self.get_suitable_actions_for_invalid_file(f),
         }
-    }
-
-    pub fn is_dir_synced(&self, dir: &Directory) -> bool {
-        dir.children()
-            .iter()
-            .map(|(_, c)| match c {
-                FsEntry::FsFile(_) => false,
-                FsEntry::FsMusicFile(mf) => mf.sync_data.synced,
-                FsEntry::FsDirectory(d) => self.is_dir_synced(d),
-            })
-            .reduce(|acc, v| acc && v)
-            .unwrap_or(false)
     }
 
     fn load_index() -> BTreeMap<PathBuf, SyncedEntry> {
@@ -317,7 +305,7 @@ impl Dissonance {
     }
 
     pub fn set_sync_intention(&mut self, rel_path: PathBuf, intention: SyncIntention) {
-        let entry = self.file_tree.find(&rel_path);
+        let entry = self.root_dir.find_recursive(&rel_path);
         match entry {
             Some(FsEntry::FsMusicFile(_)) => {}
             Some(FsEntry::FsDirectory(d)) => {
@@ -341,18 +329,18 @@ impl Dissonance {
             }
         };
 
-        self.file_tree
-            .set_sync_info(&rel_path, SyncedEntry { intention, synced });
+        self.root_dir
+            .set_sync_info_recursive(&rel_path, SyncedEntry { intention, synced });
     }
 
     fn update_index_destination(&mut self, dest_entries: &HashSet<PathBuf>) {
-        let sync_info = self.file_tree.create_index();
+        let sync_info = self.root_dir.create_index_recursive();
         for (rel_path, entry) in sync_info.iter() {
             let is_in_dest = dest_entries.contains(rel_path);
 
             match entry.intention {
                 SyncIntention::KeepSync => {
-                    self.file_tree.set_sync_info(
+                    self.root_dir.set_sync_info_recursive(
                         rel_path,
                         SyncedEntry {
                             intention: SyncIntention::KeepSync,
@@ -361,7 +349,7 @@ impl Dissonance {
                     );
                 }
                 SyncIntention::DropSync => {
-                    self.file_tree.set_sync_info(
+                    self.root_dir.set_sync_info_recursive(
                         rel_path,
                         SyncedEntry {
                             intention: SyncIntention::DropSync,
@@ -370,7 +358,7 @@ impl Dissonance {
                     );
                 }
                 SyncIntention::Unspecified => {
-                    self.file_tree.set_sync_info(
+                    self.root_dir.set_sync_info_recursive(
                         rel_path,
                         SyncedEntry {
                             intention: SyncIntention::Unspecified,
@@ -379,7 +367,7 @@ impl Dissonance {
                     );
                 }
                 SyncIntention::ForceSync => {
-                    self.file_tree.set_sync_info(
+                    self.root_dir.set_sync_info_recursive(
                         rel_path,
                         SyncedEntry {
                             intention: SyncIntention::ForceSync,
@@ -392,7 +380,7 @@ impl Dissonance {
                         "WARN: MixedDir intention for a file: {}",
                         rel_path.display()
                     );
-                    self.file_tree.set_sync_info(
+                    self.root_dir.set_sync_info_recursive(
                         rel_path,
                         SyncedEntry {
                             intention: SyncIntention::Unspecified,
@@ -519,7 +507,7 @@ impl Dissonance {
             return;
         }
 
-        let entry = match self.file_tree.find(&path) {
+        let entry = match self.root_dir.find_recursive(&path) {
             Some(entry) => entry,
             None => return,
         };
@@ -531,10 +519,10 @@ impl Dissonance {
 
                 let sync_data = mf.sync_data.clone();
 
-                if !self.file_tree.remove_entry(&path) {
+                if !self.root_dir.remove_entry_recursive(&path) {
                     println!("Failed to forget file: {}", path.display());
                 }
-                self.file_tree.add_entry(&path, sync_data);
+                self.root_dir.add_entry_recursive(&path, sync_data);
             }
             FsEntry::FsDirectory(d) => {
                 let children: Vec<PathBuf> = d
@@ -555,16 +543,16 @@ impl Dissonance {
             return;
         }
 
-        match self.file_tree.find(&path) {
+        match self.root_dir.find_recursive(&path) {
             Some(FsEntry::FsMusicFile(mf)) => {
                 mf.remove_tags();
 
                 let sync_data = mf.sync_data.clone();
 
-                if !self.file_tree.remove_entry(&path) {
+                if !self.root_dir.remove_entry_recursive(&path) {
                     println!("Failed to forget file: {}", path.display());
                 }
-                self.file_tree.add_entry(&path, sync_data);
+                self.root_dir.add_entry_recursive(&path, sync_data);
             }
             Some(FsEntry::FsDirectory(d)) => {
                 let children: Vec<PathBuf> = d
@@ -587,7 +575,7 @@ impl Dissonance {
         if abs_path.is_file() {
             match fs::remove_file(abs_path) {
                 Ok(()) => {
-                    self.file_tree.remove_entry(&rel_path);
+                    self.root_dir.remove_entry_recursive(&rel_path);
                 }
                 Err(e) => {
                     println!("Failed to remove file {}: {}", rel_path.display(), e);
@@ -598,7 +586,7 @@ impl Dissonance {
 
     pub fn move_entry_to_tag_based_path(&mut self, path: PathBuf) -> Option<PathBuf> {
         let (rel_path, tag_based_rel_path) = {
-            let entry = self.file_tree.find(&path);
+            let entry = self.root_dir.find_recursive(&path);
             let file = match entry {
                 Some(FsEntry::FsMusicFile(mf)) => mf,
                 Some(FsEntry::FsDirectory(d)) => {
@@ -613,11 +601,11 @@ impl Dissonance {
                         self.move_entry_to_tag_based_path(child);
                     }
 
-                    let dir = self.file_tree.find(&dir_path).expect("No dir on moving");
+                    let dir = self.root_dir.find_recursive(&dir_path).expect("No dir on moving");
                     match dir {
                         FsEntry::FsDirectory(d) => {
                             if d.children().is_empty() {
-                                self.file_tree.remove_entry(&dir_path);
+                                self.root_dir.remove_entry_recursive(&dir_path);
                             }
                         }
                         _ => panic!("Expected dir"),
@@ -651,14 +639,14 @@ impl Dissonance {
             return;
         }
 
-        self.file_tree.add_entry(
+        self.root_dir.add_entry_recursive(
             &to,
             SyncedEntry {
                 intention: SyncIntention::Unspecified,
                 synced: false,
             },
         );
-        if !self.file_tree.remove_entry(&from) {
+        if !self.root_dir.remove_entry_recursive(&from) {
             println!("Failed to forget file: {}", from.to_string_lossy());
         }
 
@@ -666,7 +654,7 @@ impl Dissonance {
     }
 
     pub fn fix_characters(&mut self, old_path: &PathBuf) -> Option<PathBuf> {
-        let entry = match self.file_tree.find(old_path) {
+        let entry = match self.root_dir.find_recursive(old_path) {
             Some(entry) => entry.clone(),
             None => return None,
         };
@@ -693,7 +681,7 @@ impl Dissonance {
                     self.fix_characters(&child);
                 }
 
-                self.file_tree.remove_entry(&d.relative_path.clone());
+                self.root_dir.remove_entry_recursive(&d.relative_path.clone());
                 let _ = remove_empty_subdirs::remove_empty_subdirs(&self.source.clone().unwrap());
                 None
             }
@@ -945,7 +933,7 @@ mod tests {
         };
         let mut backend = Dissonance::new(saved_state);
 
-        let source_files = crate::file_tree::load_dir_hash_set_files_only(
+        let source_files = crate::directory::load_dir_hash_set_files_only(
             dirs.source().to_path_buf(),
             PathBuf::new(),
         );
