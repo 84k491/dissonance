@@ -23,13 +23,16 @@ use crate::{
 
 mod directory;
 mod dissonance;
+mod fetch_tags;
 mod music_file;
+mod picker;
+mod remote_tag_source;
 mod tags;
 
 slint::include_modules!();
 
-type Backend = Arc<Mutex<Dissonance>>;
-type Selected = Arc<Mutex<Option<PathBuf>>>;
+pub(crate) type Backend = Arc<Mutex<Dissonance>>;
+pub(crate) type Selected = Arc<Mutex<Option<PathBuf>>>;
 
 fn main() -> Result<(), slint::PlatformError> {
     let saved_state = load_saved_state();
@@ -287,6 +290,14 @@ fn on_action_clicked(
         let Some(path) = path else {
             return;
         };
+
+        // FetchTags talks to the network and to the user, so it runs on its own
+        // thread and repaints the main window once it is done.
+        if action.as_str() == "FetchTags" {
+            fetch_tags::start(path, weak.clone(), backend.clone(), selected.clone());
+            return;
+        }
+
         let mut b = backend.lock().unwrap();
         match action.as_str() {
             "FixTags" => b.fix_tags(path),
@@ -311,7 +322,7 @@ fn on_action_clicked(
 }
 
 /// Recompute every UI-exposed model from the current backend state.
-fn refresh(ui: &AppWindow, backend: &Dissonance, selected: &Option<PathBuf>) {
+pub(crate) fn refresh(ui: &AppWindow, backend: &Dissonance, selected: &Option<PathBuf>) {
     let mut tree_rows = Vec::new();
     flatten_tree(
         backend,

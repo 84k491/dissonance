@@ -1,0 +1,55 @@
+import { Button, ListView, VerticalBox } from "std-widgets.slint";
+
+// Standalone window FetchTags uses to ask the user which remote entry matches
+// the local one, and to report failures (with 'message-only' set). It stays
+// open until one of its buttons is pressed.
+export component PickerWindow inherits Window {
+    title: "Dissonance";
+    preferred-width: 560px;
+    preferred-height: 420px;
+
+    in property <string> heading;
+    in property <string> message;
+    in property <[string]> items;
+    in property <bool> message-only;
+
+    callback picked(int);
+    callback skipped();
+    callback cancelled();
+
+    VerticalBox {
+        Text {
+            text: root.heading;
+            font-size: 15px;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.message;
+            wrap: word-wrap;
+        }
+        ListView {
+            visible: !root.message-only;
+            vertical-stretch: 1;
+            for item[i] in root.items: HorizontalLayout {
+                padding: 2px;
+                Button {
+                    text: item;
+                    clicked => { root.picked(i); }
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 6px;
+            Button {
+                text: "Skip";
+                visible: !root.message-only;
+                clicked => { root.skipped(); }
+            }
+            Button {
+                text: root.message-only ? "Close" : "Cancel";
+                clicked => { root.cancelled(); }
+            }
+        }
+    }
+}

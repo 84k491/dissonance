@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::directory::load_dir_hash_set_files_only;
 use crate::{
-    directory::{Directory, FsEntry},
+    directory::{Directory, DirectoryMetadata, FsEntry},
     music_file::{FsEntryTrait, InvalidFile, MusicFile},
+    tags::tags::Tags,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -45,6 +46,7 @@ impl Display for Problem {
 pub enum Action {
     RemoveTags,
     FixTags,
+    FetchTags,
     FixCharacters,
     MoveFile,
     ForceSync,
@@ -455,6 +457,11 @@ impl Dissonance {
     fn get_suitable_actions_for_dir(&self, d: &Directory) -> BTreeSet<Action> {
         let mut actions = BTreeSet::new();
 
+        // Only an album can be looked up in a remote tag source.
+        if matches!(d.meta(), DirectoryMetadata::AlbumMeta(_)) {
+            actions.insert(Action::FetchTags);
+        }
+
         match d.intention() {
             SyncIntention::KeepSync => {
                 actions.insert(Action::DropSync);
@@ -535,6 +542,28 @@ impl Dissonance {
                 }
             }
             _ => {}
+        }
+    }
+
+    // Overwrites the tags of the given files with the ones FetchTags composed
+    // out of a remote tag source.
+    pub fn apply_fetched_tags(&mut self, updates: Vec<(PathBuf, Tags)>) {
+        for (path, tags) in updates {
+            let sync_data = match self.root_dir.find_recursive(&path) {
+                Some(FsEntry::FsMusicFile(mf)) => {
+                    mf.set_tags(&tags);
+                    mf.sync_data.clone()
+                }
+                _ => {
+                    println!("Failed to retag a missing file: {}", path.display());
+                    continue;
+                }
+            };
+
+            if !self.root_dir.remove_entry_recursive(&path) {
+                println!("Failed to forget file: {}", path.display());
+            }
+            self.root_dir.add_entry_recursive(&path, sync_data);
         }
     }
 

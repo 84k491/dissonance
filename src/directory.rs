@@ -102,7 +102,6 @@ impl Directory {
         return ret;
     }
 
-    #[allow(dead_code)]
     pub fn meta(&self) -> &DirectoryMetadata {
         return &self.meta;
     }

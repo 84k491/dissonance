@@ -1,4 +1,8 @@
 import { Button, LineEdit, ListView, VerticalBox, HorizontalBox, ProgressIndicator } from "std-widgets.slint";
+import { PickerWindow } from "picker.slint";
+
+// Re-exported so the generated Rust module exposes it next to AppWindow.
+export { PickerWindow }
 
 export struct TreeRow {
     label: string,
