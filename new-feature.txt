@@ -1,0 +1,48 @@
+RemoteTagsSource feature requirements
+
+In this new feature i need to be able to map each local artist to an artist in a "remote tag source".
+Later there will be the same mapping for albums to obtain correct tags for tracks.
+
+Remote tag source is iTunes API, but we won't name it strictly in the code, except in url.
+Because there will be unit tests that mustn't know about iTunes. And maybe there will be other sources later.
+
+To save this mapping, we'll have a new persistent map. The map will be just a json file like:
+[
+    "LocalArtistName": { "id": "123456" },
+    "RemoteSourceArtistName": { "id": "123456" },
+    "OtherRemoteSourceArtistName": { "id": "890123468" }
+]
+Where "123456" is an id of an artist in the remote tags source.
+Check if iTunes API provide a request for an artist with just an id. It not - ABORT this feature.
+
+Let's name this file "RemoteArtistMapping.json". And save it in the same directory as index
+
+Note that several artist names can be mapped to a single id.
+If local and remote artist names match completely, there will be a single entry.
+If a local name doesn't match completely to a remote one, there will two entries appear. One for local name and one for a remote one.
+
+Artist mapping can be absent or "no suitable".
+Absent is a starting state, when we didn't requested this mapping (or reset it).
+And "no suitable" is when we already requestsed this mapping and find no suitable option.
+The difference is in available actions. "No suitable" does not provide a "request" action and does not fire a problem.
+
+If an artist don't have a mapping - it must be marked as problematic.
+An artist with such a problem but provide an action "MapRemoteTagSource"
+
+There can be a local responses cache, but no, we don't implement it now. Every request will be over-net now.
+
+There must be an action to reset mapping in states other than "Absent".
+
+How whis must work:
+After a click on an action's button, take an artists's local name, use it to obtain a list of artists from the remote tag source.
+Prompt user to choose an artist from this list (with a modal window). In this list, there must be an option "No suitable".
+There must be "persentage of likeliness" metric displayed in this list next to every option. The metric is a levenstein distance from a local artist's name, in percents
+
+There must be a trait "RemoveInfoProvider". It provides (localArtist) -> artistList. It must be used to inherit providers in production and unit test code.
+Also, there must me a trait "ArtistSelector". It provides (artistList) -> finalArtist. It must be used in prod and unit tests also.
+
+The json storage must be read somewhere near to index.json. And then be used to create FsEntries.
+
+After a finished request (or a read from file), this remote tag info must be saved in Directory's member "remote_meta". Now, for an artist only.
+
+If a local artist has a remote mapping, there must a "InstallRemoteTags" action available. It will install this artist recursively down, for each file. 'recalc_meta()' must be called after this operation if it's not already.
