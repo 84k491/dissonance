@@ -13,17 +13,23 @@ pub(crate) use crate::directory::FsEntry;
 pub(crate) use crate::dissonance::{Problem, SyncIntention, SyncedEntry};
 
 use crate::{
+    artist_selector::ModalArtistSelector,
     directory::load_dir_hash_set_files_only,
     dissonance::{
         Dissonance, FilesystemAction, FilesystemActionReport, load_saved_state,
         process_filesystem_action,
     },
+    itunes::HttpRemoteInfoProvider,
     music_file::FsEntryTrait,
+    remote_tags::{RemoteArtistMeta, resolve_artist_mapping, resolve_remote_name},
 };
 
+mod artist_selector;
 mod directory;
 mod dissonance;
+mod itunes;
 mod music_file;
+mod remote_tags;
 mod tags;
 
 slint::include_modules!();
@@ -287,6 +293,19 @@ fn on_action_clicked(
         let Some(path) = path else {
             return;
         };
+
+        match action.as_str() {
+            "MapRemoteTagSource" => {
+                start_artist_mapping(path, weak.clone(), backend.clone(), selected.clone());
+                return;
+            }
+            "InstallRemoteTags" => {
+                start_remote_tags_install(path, weak.clone(), backend.clone(), selected.clone());
+                return;
+            }
+            _ => {}
+        }
+
         let mut b = backend.lock().unwrap();
         match action.as_str() {
             "FixTags" => b.fix_tags(path),
@@ -300,6 +319,7 @@ fn on_action_clicked(
                 let new_path = b.fix_characters(&path);
                 *selected.lock().unwrap() = new_path;
             }
+            "ResetRemoteMapping" => b.reset_remote_artist_mapping(&path),
             "ForceSync" => b.set_sync_intention(path, SyncIntention::ForceSync),
             "KeepSync" => b.set_sync_intention(path, SyncIntention::KeepSync),
             "DropSync" => b.set_sync_intention(path, SyncIntention::DropSync),
@@ -308,6 +328,78 @@ fn on_action_clicked(
         let s = selected.lock().unwrap();
         refresh(&ui, &b, &s);
     }
+}
+
+fn start_artist_mapping(path: PathBuf, weak: Weak<AppWindow>, backend: Backend, selected: Selected) {
+    let local_name = { backend.lock().unwrap().artist_local_name(&path) };
+    let Some(local_name) = local_name else {
+        return;
+    };
+
+    thread::spawn(move || {
+        let provider = HttpRemoteInfoProvider::new();
+        let selector = ModalArtistSelector {};
+
+        let meta = match resolve_artist_mapping(&local_name, &provider, &selector) {
+            Err(e) => {
+                println!("Failed to map artist '{}': {}", local_name, e);
+                return;
+            }
+            // cancelled, the state stays as it was
+            Ok(None) => return,
+            Ok(Some(meta)) => meta,
+        };
+
+        apply_on_ui_thread(weak, backend, selected, move |b| {
+            b.set_remote_artist_mapping(&path, &meta)
+        });
+    });
+}
+
+fn start_remote_tags_install(
+    path: PathBuf,
+    weak: Weak<AppWindow>,
+    backend: Backend,
+    selected: Selected,
+) {
+    let meta = { backend.lock().unwrap().remote_artist_meta(&path) };
+    let Some(meta) = meta else {
+        return;
+    };
+
+    thread::spawn(move || {
+        let provider = HttpRemoteInfoProvider::new();
+
+        let remote_name = match resolve_remote_name(&meta, &provider) {
+            Err(e) => {
+                println!("Failed to get the remote artist name: {}", e);
+                return;
+            }
+            Ok(name) => name,
+        };
+
+        apply_on_ui_thread(weak, backend, selected, move |b| {
+            b.install_remote_tags(&path, &remote_name)
+        });
+    });
+}
+
+fn apply_on_ui_thread(
+    weak: Weak<AppWindow>,
+    backend: Backend,
+    selected: Selected,
+    change: impl FnOnce(&mut Dissonance) + Send + 'static,
+) {
+    slint::invoke_from_event_loop(move || {
+        let mut b = backend.lock().unwrap();
+        change(&mut b);
+
+        let s = selected.lock().unwrap();
+        if let Some(ui) = weak.upgrade() {
+            refresh(&ui, &b, &s);
+        }
+    })
+    .ok();
 }
 
 /// Recompute every UI-exposed model from the current backend state.
@@ -378,6 +470,19 @@ fn flatten_tree(
     }
 }
 
+/// How the mapping of an artist directory is shown in the info panel.
+fn remote_meta_line(meta: &Option<RemoteArtistMeta>) -> String {
+    match meta {
+        None => "Remote artist: not requested".to_string(),
+        Some(RemoteArtistMeta::NoSuitable) => "Remote artist: no suitable".to_string(),
+        Some(RemoteArtistMeta::Mapped { id, name: None }) => format!("Remote artist id: {}", id),
+        Some(RemoteArtistMeta::Mapped {
+            id,
+            name: Some(name),
+        }) => format!("Remote artist: {} ({})", name, id),
+    }
+}
+
 /// Background tint for a tree row, derived from its sync intention. Selected
 /// rows are darkened. Mirrors the old iced `ButtonStyle`.
 fn intention_color(intention: SyncIntention, selected: bool) -> Color {
@@ -433,9 +538,19 @@ fn build_panels(
         FsEntry::FsFile(f) => info.push(TextRow {
             text: f.relative_path.display().to_string().into(),
         }),
-        FsEntry::FsDirectory(d) => info.push(TextRow {
-            text: d.relative_path.display().to_string().into(),
-        }),
+        FsEntry::FsDirectory(d) => {
+            info.push(TextRow {
+                text: d.relative_path.display().to_string().into(),
+            });
+
+            // an album belongs to an artist as well, but only an artist
+            // directory can be mapped onto the remote source
+            if d.is_artist() {
+                info.push(TextRow {
+                    text: remote_meta_line(d.remote_meta()).into(),
+                });
+            }
+        }
         FsEntry::FsMusicFile(mf) => {
             let tags = mf.tags();
             info.push(TextRow {
@@ -450,12 +565,16 @@ fn build_panels(
         }
     }
 
-    if let FsEntry::FsMusicFile(mf) = entry {
-        for problem in mf.find_problems() {
-            problems.push(TextRow {
-                text: problem.to_string().into(),
-            });
-        }
+    let found_problems = match entry {
+        FsEntry::FsMusicFile(mf) => mf.find_problems(),
+        FsEntry::FsDirectory(d) => d.find_problems(),
+        FsEntry::FsFile(f) => f.find_problems(),
+    };
+
+    for problem in found_problems {
+        problems.push(TextRow {
+            text: problem.to_string().into(),
+        });
     }
 
     for action in backend.get_suitable_actions(entry) {

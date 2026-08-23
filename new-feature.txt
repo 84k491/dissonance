@@ -7,13 +7,17 @@ Remote tag source is iTunes API, but we won't name it strictly in the code, exce
 Because there will be unit tests that mustn't know about iTunes. And maybe there will be other sources later.
 
 To save this mapping, we'll have a new persistent map. The map will be just a json file like:
-[
+{
     "LocalArtistName": { "id": "123456" },
     "RemoteSourceArtistName": { "id": "123456" },
     "OtherRemoteSourceArtistName": { "id": "890123468" }
-]
+}
 Where "123456" is an id of an artist in the remote tags source.
-Check if iTunes API provide a request for an artist with just an id. It not - ABORT this feature.
+
+CHECKED: iTunes API does provide a request for an artist by id alone, so the feature is NOT aborted.
+    by id:     GET https://itunes.apple.com/lookup?id=909253
+    by name:   GET https://itunes.apple.com/search?term=<name>&entity=musicArtist&limit=<n>
+Both return records with "artistId", "artistName".
 
 Let's name this file "RemoteArtistMapping.json". And save it in the same directory as index
 
@@ -25,6 +29,18 @@ Artist mapping can be absent or "no suitable".
 Absent is a starting state, when we didn't requested this mapping (or reset it).
 And "no suitable" is when we already requestsed this mapping and find no suitable option.
 The difference is in available actions. "No suitable" does not provide a "request" action and does not fire a problem.
+
+Absent has no variant of its own: the in-memory type is Option<RemoteArtistMeta>, where None is
+"absent". On disk, absent is a missing key and "no suitable" is { "id": "NoSuitable" }.
+A null id in the file is read as None, that is "absent" as well.
+
+    enum RemoteArtistMeta {
+        NoSuitable,
+        Mapped { id: String, name: Option<String> },
+    }
+
+Only the id is persisted. The remote artist name is re-requested by id when it is needed, and the
+"name" field above is kept on the directory itself, never written to the file.
 
 If an artist don't have a mapping - it must be marked as problematic.
 An artist with such a problem but provide an action "MapRemoteTagSource"
@@ -38,11 +54,59 @@ After a click on an action's button, take an artists's local name, use it to obt
 Prompt user to choose an artist from this list (with a modal window). In this list, there must be an option "No suitable".
 There must be "persentage of likeliness" metric displayed in this list next to every option. The metric is a levenstein distance from a local artist's name, in percents
 
-There must be a trait "RemoveInfoProvider". It provides (localArtist) -> artistList. It must be used to inherit providers in production and unit test code.
+The metric is 100 * (1 - distance / max(len(local), len(remote))), compared case-insensitively over
+chars, not bytes. Every option shows the remote id as well, because the source can hold several
+artists of the very same name. The modal also has a "Cancel" that leaves the state untouched.
+
+There must be a trait "RemoteInfoProvider". It provides (localArtist) -> artistList. It must be used to inherit providers in production and unit test code.
 Also, there must me a trait "ArtistSelector". It provides (artistList) -> finalArtist. It must be used in prod and unit tests also.
+
+RemoteInfoProvider needs a second method, (id) -> artist, because only the id is persisted and the
+name has to be re-requested before installing tags. Both methods are faked in tests.
+
+Mocks must be pre-seeded, not scripted per-call:
+    MockRemoteInfoProvider is constructed with the whole universe of artists it knows about; a real
+    call to (localArtist) -> artistList filters that universe and returns the matches.
+    MockArtistSelector is constructed with the choice rule (e.g. a name to pick, or "no suitable");
+    a real call to (artistList) -> finalArtist picks the matching entry out of the list it is given.
 
 The json storage must be read somewhere near to index.json. And then be used to create FsEntries.
 
 After a finished request (or a read from file), this remote tag info must be saved in Directory's member "remote_meta". Now, for an artist only.
+An "artist" here is a Directory whose meta is DirectoryMetadata::ArtistMeta.
+
+NO CONCURRENT CODE IN Directory. Directory holds a plain "remote_meta: Option<RemoteArtistMeta>"
+and gets a recursive "set_remote_mapping_database(&mut self, map: &RemoteArtistMappingDatabase)"
+that takes the database by plain reference.
+
+The tree is the source of truth of the mapping, not a database kept beside it:
+    the file is read once, on loading the root, and poured into the tree;
+    an action only sets or clears "remote_meta" of one artist directory, and writes nothing;
+    on closing, "create_remote_mapping_recursive()" walks every artist directory and the file is
+    replaced as a whole, exactly like index.json is. A reset artist is simply not written.
+The only exception is an empty tree, which means the source was never loaded: there is nothing to
+write it out of, so the file is left alone.
+
+An artist directory is told apart by "is_artist()", never by an artist name being present: an album
+directory belongs to an artist too, so "artist_name()" answers for both of them.
+
+All concurrency lives in main. The whole request flow is one pure, lock-free function:
+    resolve_artist_mapping(local_name, &dyn RemoteInfoProvider, &dyn ArtistSelector)
+        -> Result<Option<RemoteArtistMeta>, String>
+The worker thread in main reads the artist name under the lock, drops the lock, calls that function
+(net request, then the blocking modal), then re-locks to apply the result. The production
+ArtistSelector opens the Slint modal via invoke_from_event_loop and blocks on a channel; that
+channel code lives in main only. Unit tests call the same function with the mocks above.
 
 If a local artist has a remote mapping, there must a "InstallRemoteTags" action available. It will install this artist recursively down, for each file. 'recalc_meta()' must be called after this operation if it's not already.
+Installing writes the remote artist name into the "artist" tag of every music file below, and leaves
+album / title / year / track number alone. Files are not moved, so a MismatchedPath problem may
+appear afterwards and is fixed by the existing MoveFile action.
+
+Network errors are logged, no modal is shown and the state stays unchanged.
+
+HTTP client: reqwest with the "blocking" feature. iTunes urls appear in src/itunes.rs only.
+
+Unit tests must not write into the config directory of a real run, so
+config_file_path() honours the "DISSONANCE_CONFIG_DIR" env variable and the tests point it at a
+temp directory.

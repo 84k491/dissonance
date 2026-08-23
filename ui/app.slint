@@ -17,6 +17,11 @@ export struct ActionRow {
     action: string,
 }
 
+export struct ArtistOption {
+    label: string,
+    index: int,
+}
+
 export component AppWindow inherits Window {
     title: "Dissonance";
     preferred-width: 900px;
@@ -153,6 +158,47 @@ export component ProgressWindow inherits Window {
             Button {
                 text: "Close";
                 clicked => { root.close-window(); }
+            }
+        }
+    }
+}
+
+// Standalone window shown while a remote artist mapping is requested. The
+// worker thread that opened it waits until one of these buttons is pressed.
+export component ArtistSelectWindow inherits Window {
+    title: "Remote artist";
+    preferred-width: 460px;
+    preferred-height: 420px;
+
+    in property <string> local-name;
+    in property <[ArtistOption]> options;
+
+    callback chosen(int);
+    callback no-suitable();
+    callback cancel();
+
+    VerticalBox {
+        Text {
+            text: "Local artist: " + root.local-name;
+        }
+        ListView {
+            vertical-stretch: 1;
+            for o in root.options: HorizontalLayout {
+                Button {
+                    text: o.label;
+                    clicked => { root.chosen(o.index); }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            Button {
+                text: "No suitable";
+                clicked => { root.no-suitable(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancel(); }
             }
         }
     }

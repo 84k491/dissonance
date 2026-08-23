@@ -4,13 +4,14 @@ use crate::directory::load_dir_hash_set_files_only;
 use crate::{
     directory::{Directory, FsEntry},
     music_file::{FsEntryTrait, InvalidFile, MusicFile},
+    remote_tags::{RemoteArtistMappingDatabase, RemoteArtistMeta},
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt::{self, Display},
     fs::{self, File},
     io::{self, BufWriter, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -22,6 +23,19 @@ pub struct AppSavedState {
 static CONFIG_REL_PATH: &str = ".config/dissonance";
 static STATE_FILENAME: &str = "saved_state.json";
 static INDEX_FILENAME: &str = "index.json";
+static REMOTE_ARTIST_MAPPING_FILENAME: &str = "RemoteArtistMapping.json";
+
+// Everything the app persists lives in one directory. Tests point
+// 'DISSONANCE_CONFIG_DIR' at a directory of their own, so that they never touch
+// the files of a real run.
+fn config_file_path(filename: &str) -> PathBuf {
+    if let Some(dir) = std::env::var_os("DISSONANCE_CONFIG_DIR") {
+        return PathBuf::from(dir).join(filename);
+    }
+
+    let home = std::env::home_dir().expect("Failed to get home dir");
+    home.join(PathBuf::from(CONFIG_REL_PATH)).join(filename)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Problem {
@@ -33,6 +47,7 @@ pub enum Problem {
     MismatchedPath,
     MissingTrackNumber,
     MissingYear,
+    MissingRemoteArtistMapping,
 }
 
 impl Display for Problem {
@@ -51,6 +66,9 @@ pub enum Action {
     KeepSync,
     DropSync,
     DeleteEntry,
+    MapRemoteTagSource,
+    ResetRemoteMapping,
+    InstallRemoteTags,
 }
 
 impl Display for Action {
@@ -113,6 +131,7 @@ impl Drop for Dissonance {
     fn drop(&mut self) {
         let index = self.root_dir.create_index_recursive();
         Self::save_index(index);
+        self.save_remote_mapping_database();
         save_state(self.source.clone(), self.destination.clone());
     }
 }
@@ -138,7 +157,10 @@ impl Dissonance {
 
     pub fn handle_root_loaded(&mut self, nodes: HashSet<PathBuf>) {
         let index = Self::load_index();
+        let remote_mapping_database = Self::load_remote_mapping_database();
         self.root_dir = Directory::from_paths(nodes, self.source.clone().unwrap(), index);
+        self.root_dir
+            .set_remote_mapping_database(&remote_mapping_database);
 
         println!("Source dir loaded");
 
@@ -257,10 +279,8 @@ impl Dissonance {
     }
 
     fn load_index() -> BTreeMap<PathBuf, SyncedEntry> {
-        let pwd = std::env::home_dir().expect("Failed to get home dir");
-        let path = pwd
-            .join(PathBuf::from(CONFIG_REL_PATH))
-            .join(INDEX_FILENAME);
+        let path = config_file_path(INDEX_FILENAME);
+
         let file = match File::open(path) {
             Err(e) => {
                 println!("Failed to open index: {}", e);
@@ -279,10 +299,8 @@ impl Dissonance {
     }
 
     fn save_index(index: BTreeMap<PathBuf, SyncedEntry>) {
-        let pwd = std::env::home_dir().expect("Failed to get home dir");
-        let path = pwd
-            .join(PathBuf::from(CONFIG_REL_PATH))
-            .join(INDEX_FILENAME);
+        let path = config_file_path(INDEX_FILENAME);
+
         match fs::create_dir_all(path.parent().expect("No parent on index save")) {
             Err(e) => println!("Failed to create dir {}: {}", path.display(), e),
             Ok(_) => {}
@@ -304,12 +322,142 @@ impl Dissonance {
         println!("Index saved: {} files", index.len());
     }
 
+    fn load_remote_mapping_database() -> RemoteArtistMappingDatabase {
+        let path = config_file_path(REMOTE_ARTIST_MAPPING_FILENAME);
+
+        let file = match File::open(path) {
+            Err(e) => {
+                println!("Failed to open the remote artist mapping: {}", e);
+                return RemoteArtistMappingDatabase::new();
+            }
+            Ok(f) => f,
+        };
+
+        let map: RemoteArtistMappingDatabase = match serde_json::from_reader(file) {
+            Err(e) => {
+                println!("Failed to parse the remote artist mapping: {}", e);
+                return RemoteArtistMappingDatabase::new();
+            }
+            Ok(m) => m,
+        };
+
+        println!(
+            "Remote artist mapping loaded from json: {} artists",
+            map.len()
+        );
+        map
+    }
+
+    fn save_remote_mapping(map: &RemoteArtistMappingDatabase) {
+        let path = config_file_path(REMOTE_ARTIST_MAPPING_FILENAME);
+        match fs::create_dir_all(path.parent().expect("No parent on mapping save")) {
+            Err(e) => println!("Failed to create dir {}: {}", path.display(), e),
+            Ok(_) => {}
+        }
+
+        let file = match File::create(&path) {
+            Err(e) => {
+                println!("Failed to create {}: {}", path.display(), e);
+                return;
+            }
+            Ok(f) => BufWriter::new(f),
+        };
+
+        match serde_json::to_writer_pretty(file, map) {
+            Err(e) => println!("Failed to write to {}: {}", path.display(), e),
+            Ok(_) => println!("Remote artist mapping saved: {} artists", map.len()),
+        }
+    }
+
+    // TODO why it is used? Avoid?
+    pub fn artist_local_name(&self, rel_path: &Path) -> Option<String> {
+        match self.root_dir.find_recursive(rel_path) {
+            Some(FsEntry::FsDirectory(d)) => d.mapped_artist_name().map(|name| name.to_string()),
+            _ => None,
+        }
+    }
+
+    pub fn remote_artist_meta(&self, rel_path: &Path) -> Option<RemoteArtistMeta> {
+        match self.root_dir.find_recursive(rel_path) {
+            Some(FsEntry::FsDirectory(d)) => d.remote_meta().clone(),
+            _ => None,
+        }
+    }
+
+    // Adopts a finished mapping request. Nothing is written to the file here:
+    // the whole of it is rewritten out of the tree on closing.
+    pub fn set_remote_artist_mapping(&mut self, rel_path: &Path, meta: &RemoteArtistMeta) {
+        self.root_dir
+            .set_remote_meta_recursive(rel_path, Some(meta.clone()));
+    }
+
+    pub fn reset_remote_artist_mapping(&mut self, rel_path: &Path) {
+        self.root_dir.set_remote_meta_recursive(rel_path, None);
+    }
+
+    // Writes the mapping of every artist of the tree, replacing the file as a
+    // whole. An empty tree means the source was never loaded, so there is
+    // nothing to write it out of.
+    fn save_remote_mapping_database(&self) {
+        if self.root_dir.children().is_empty() {
+            return;
+        }
+
+        Self::save_remote_mapping(&self.root_dir.create_remote_mapping_recursive());
+    }
+
+    pub fn install_remote_tags(&mut self, rel_path: &Path, remote_name: &str) {
+        let files = match self.root_dir.find_recursive(rel_path) {
+            Some(FsEntry::FsDirectory(d)) => d.children_music_files_recursive(),
+            _ => return,
+        };
+
+        for file in files {
+            let sync_data = match self.root_dir.find_recursive(&file) {
+                Some(FsEntry::FsMusicFile(mf)) => mf.sync_data.clone(),
+                _ => continue,
+            };
+
+            self.write_artist_tag(&file, remote_name);
+
+            // read the file again, so that its problems and the meta of every
+            // directory above it are recalculated. Only the node of the tree is
+            // dropped here, never the file itself
+            if !self.root_dir.remove_entry_recursive(&file) {
+                println!("Failed to forget file: {}", file.display());
+            }
+            self.root_dir.add_entry_recursive(&file, sync_data);
+        }
+
+        // the requested name is kept on the artist itself, so that the mapping
+        // written on closing holds the remote name as well as the local one
+        if let Some(RemoteArtistMeta::Mapped { id, .. }) = self.remote_artist_meta(rel_path) {
+            let named = RemoteArtistMeta::Mapped {
+                id,
+                name: Some(remote_name.to_string()),
+            };
+            self.root_dir.set_remote_meta_recursive(rel_path, Some(named));
+        }
+    }
+
+    // Replaces the artist of one music file, keeping every other tag of it.
+    fn write_artist_tag(&self, rel_path: &Path, artist: &str) {
+        let mf = match self.root_dir.find_recursive(rel_path) {
+            Some(FsEntry::FsMusicFile(mf)) => mf,
+            _ => return,
+        };
+
+        let mut tags = mf.tags();
+        tags.artist = artist.to_string();
+        mf.set_tags(&tags);
+    }
+
     pub fn set_sync_intention(&mut self, rel_path: PathBuf, intention: SyncIntention) {
         let entry = self.root_dir.find_recursive(&rel_path);
         match entry {
             Some(FsEntry::FsMusicFile(_)) => {}
             Some(FsEntry::FsDirectory(d)) => {
-                let children = d.children_recursive();
+                let children = d.children_music_files_recursive();
                 for child in children {
                     self.set_sync_intention(child.clone(), intention.clone());
                 }
@@ -472,6 +620,21 @@ impl Dissonance {
             }
         }
 
+        match d.remote_meta() {
+            None => {
+                if d.is_artist() {
+                    actions.insert(Action::MapRemoteTagSource);
+                }
+            }
+            Some(RemoteArtistMeta::NoSuitable) => {
+                actions.insert(Action::ResetRemoteMapping);
+            }
+            Some(RemoteArtistMeta::Mapped { .. }) => {
+                actions.insert(Action::InstallRemoteTags);
+                actions.insert(Action::ResetRemoteMapping);
+            }
+        }
+
         for problem in d.find_problems() {
             match problem {
                 Problem::MissingTags => {
@@ -492,6 +655,8 @@ impl Dissonance {
                 Problem::InvalidCharacters => {
                     actions.insert(Action::FixCharacters);
                 }
+                // the mapping actions are picked by the remote meta above
+                Problem::MissingRemoteArtistMapping => {}
             }
         }
 
@@ -734,10 +899,7 @@ pub fn process_filesystem_action(
 }
 
 pub fn load_saved_state() -> AppSavedState {
-    let pwd = std::env::home_dir().expect("Failed to get home dir");
-    let path = pwd
-        .join(PathBuf::from(CONFIG_REL_PATH))
-        .join(STATE_FILENAME);
+    let path = config_file_path(STATE_FILENAME);
     let file = match File::open(&path) {
         Err(e) => {
             println!("Failed to open saved state {}: {}", path.display(), e);
@@ -764,10 +926,7 @@ pub fn load_saved_state() -> AppSavedState {
 }
 
 fn save_state(source: Option<PathBuf>, destination: Option<PathBuf>) {
-    let pwd = std::env::home_dir().expect("Failed to get home dir");
-    let path = pwd
-        .join(PathBuf::from(CONFIG_REL_PATH))
-        .join(STATE_FILENAME);
+    let path = config_file_path(STATE_FILENAME);
     match fs::create_dir_all(path.parent().expect("No parent on state save")) {
         Err(e) => println!("Failed to create dir {}: {}", path.display(), e),
         Ok(_) => {}
@@ -822,13 +981,38 @@ fn mtp_copy(src: &PathBuf, dst: &PathBuf) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppSavedState, Dissonance, FilesystemAction, SyncIntention, process_filesystem_action,
+        Action, AppSavedState, Dissonance, FilesystemAction, Problem, SyncIntention,
+        process_filesystem_action,
+    };
+    use crate::{
+        directory::{Directory, FsEntry},
+        music_file::{FsEntryTrait, MusicFile},
+        remote_tags::{
+            RemoteArtistMappingDatabase, RemoteArtistMeta,
+            mocks::{MockArtistSelector, MockChoice, MockRemoteInfoProvider},
+            resolve_artist_mapping, resolve_remote_name,
+        },
     };
     use std::{
+        collections::BTreeSet,
         fs,
         path::{Path, PathBuf},
+        sync::Once,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    // Keeps every test off the config files of a real run.
+    fn redirect_config_dir() {
+        static ONCE: Once = Once::new();
+
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir().join("dissonance-test-config");
+            fs::create_dir_all(&dir).expect("create test config dir");
+
+            // safety: done once, before any test reads the variable
+            unsafe { std::env::set_var("DISSONANCE_CONFIG_DIR", &dir) };
+        });
+    }
 
     enum TestEntryKind {
         MusicFile,
@@ -914,6 +1098,8 @@ mod tests {
 
     #[test]
     fn basic_sync_scenario() {
+        redirect_config_dir();
+
         let dirs = TestDirs::new(
             &[
                 TestEntry {
@@ -965,5 +1151,320 @@ mod tests {
 
         assert!(!!!dirs.destination().join("empty").exists());
         assert!(!!!dirs.destination().join("artist/readme.txt").exists());
+    }
+
+    static ARTIST_DIR: &str = "Beatles";
+    static FIRST_SONG: &str = "Beatles/[1966] Revolver/[01] Taxman.mp3";
+    static SECOND_SONG: &str = "Beatles/[1966] Revolver/[02] Eleanor Rigby.mp3";
+
+    fn remote_universe() -> MockRemoteInfoProvider {
+        MockRemoteInfoProvider::new(&[
+            ("123456", "The Beatles"),
+            ("890123468", "Beatles Tribute Band"),
+            ("555", "Jack Johnson"),
+        ])
+    }
+
+    fn write_tags(base: &Path, rel: &str, artist: &str, title: &str, track_number: &str) {
+        let file = MusicFile::from(
+            &base.to_path_buf(),
+            &PathBuf::from(rel),
+            SyncIntention::Unspecified,
+        )
+        .expect("not a music file");
+
+        let mut tags = MusicFile::empty_tags();
+        tags.artist = artist.to_string();
+        tags.album = "Revolver".to_string();
+        tags.year = "1966".to_string();
+        tags.title = title.to_string();
+        tags.track_number = track_number.to_string();
+
+        file.set_tags(&tags);
+    }
+
+    fn artist_tag_of(base: &Path, rel: &str) -> String {
+        MusicFile::from(
+            &base.to_path_buf(),
+            &PathBuf::from(rel),
+            SyncIntention::Unspecified,
+        )
+        .expect("not a music file")
+        .tags()
+        .artist
+    }
+
+    // One artist directory holding one album of two songs, with no mapping yet.
+    fn backend_with_an_artist() -> (TestDirs, Dissonance) {
+        redirect_config_dir();
+
+        let dirs = TestDirs::new(
+            &[
+                TestEntry {
+                    path: FIRST_SONG,
+                    kind: TestEntryKind::MusicFile,
+                },
+                TestEntry {
+                    path: SECOND_SONG,
+                    kind: TestEntryKind::MusicFile,
+                },
+            ],
+            &[],
+        );
+
+        write_tags(dirs.source(), FIRST_SONG, "Beatles", "Taxman", "1");
+        write_tags(dirs.source(), SECOND_SONG, "Beatles", "Eleanor Rigby", "2");
+
+        let saved_state = AppSavedState {
+            source: Some(dirs.source().to_path_buf()),
+            destination: Some(dirs.destination().to_path_buf()),
+        };
+        let mut backend = Dissonance::new(saved_state);
+
+        let source_files = crate::directory::load_dir_hash_set_files_only(
+            dirs.source().to_path_buf(),
+            PathBuf::new(),
+        );
+        backend.handle_root_loaded(source_files);
+
+        // start from an empty mapping, whatever a previous run left behind
+        backend
+            .root_dir
+            .set_remote_mapping_database(&RemoteArtistMappingDatabase::new());
+
+        (dirs, backend)
+    }
+
+    fn dir_at<'a>(backend: &'a Dissonance, rel_path: &str) -> &'a Directory {
+        match backend.root_dir.find_recursive(Path::new(rel_path)) {
+            Some(FsEntry::FsDirectory(d)) => d,
+            _ => panic!("expected a directory at {}", rel_path),
+        }
+    }
+
+    fn actions_of(backend: &Dissonance, rel_path: &str) -> BTreeSet<Action> {
+        let entry = backend
+            .root_dir
+            .find_recursive(Path::new(rel_path))
+            .expect("expected an entry");
+
+        backend.get_suitable_actions(entry)
+    }
+
+    #[test]
+    fn an_unmapped_artist_is_problematic_and_offers_the_request() {
+        let (_dirs, backend) = backend_with_an_artist();
+
+        let artist = dir_at(&backend, ARTIST_DIR);
+        assert_eq!(artist.artist_name(), Some("Beatles"));
+        assert_eq!(artist.remote_meta(), &None);
+        assert!(artist.has_problems());
+        assert!(
+            artist
+                .find_problems()
+                .contains(&Problem::MissingRemoteArtistMapping)
+        );
+
+        let actions = actions_of(&backend, ARTIST_DIR);
+        assert!(actions.contains(&Action::MapRemoteTagSource));
+        assert!(!actions.contains(&Action::ResetRemoteMapping));
+        assert!(!actions.contains(&Action::InstallRemoteTags));
+
+        // the album below belongs to the same artist, but it is not an artist
+        // directory, so it is neither mapped nor problematic
+        let album = dir_at(&backend, "Beatles/[1966] Revolver");
+        assert!(!album.is_artist());
+        assert_eq!(album.artist_name(), Some("Beatles"));
+        assert_eq!(album.mapped_artist_name(), None);
+        assert!(
+            !album
+                .find_problems()
+                .contains(&Problem::MissingRemoteArtistMapping)
+        );
+
+        let album_actions = actions_of(&backend, "Beatles/[1966] Revolver");
+        assert!(!album_actions.contains(&Action::MapRemoteTagSource));
+    }
+
+    #[test]
+    fn mapping_an_artist_stores_both_names_and_clears_the_problem() {
+        let (_dirs, mut backend) = backend_with_an_artist();
+
+        let local_name = backend
+            .artist_local_name(Path::new(ARTIST_DIR))
+            .expect("no artist name");
+
+        let meta = resolve_artist_mapping(
+            &local_name,
+            &remote_universe(),
+            &MockArtistSelector::new(MockChoice::ByName("The Beatles".to_string())),
+        )
+        .expect("request failed")
+        .expect("cancelled");
+
+        backend.set_remote_artist_mapping(Path::new(ARTIST_DIR), &meta);
+
+        assert_eq!(
+            backend.remote_artist_meta(Path::new(ARTIST_DIR)),
+            Some(RemoteArtistMeta::Mapped {
+                id: "123456".to_string(),
+                name: Some("The Beatles".to_string()),
+            })
+        );
+
+        // the local name and the differing remote one
+        let saved = backend.root_dir.create_remote_mapping_recursive();
+        assert_eq!(saved.len(), 2);
+        assert!(saved.meta_for("Beatles").is_some());
+        assert!(saved.meta_for("The Beatles").is_some());
+
+        let artist = dir_at(&backend, ARTIST_DIR);
+        assert!(
+            !artist
+                .find_problems()
+                .contains(&Problem::MissingRemoteArtistMapping)
+        );
+
+        let actions = actions_of(&backend, ARTIST_DIR);
+        assert!(actions.contains(&Action::InstallRemoteTags));
+        assert!(actions.contains(&Action::ResetRemoteMapping));
+        assert!(!actions.contains(&Action::MapRemoteTagSource));
+    }
+
+    #[test]
+    fn no_suitable_fires_no_problem_and_offers_the_reset_only() {
+        let (_dirs, mut backend) = backend_with_an_artist();
+
+        let local_name = backend
+            .artist_local_name(Path::new(ARTIST_DIR))
+            .expect("no artist name");
+
+        let meta = resolve_artist_mapping(
+            &local_name,
+            &remote_universe(),
+            &MockArtistSelector::new(MockChoice::NoSuitable),
+        )
+        .expect("request failed")
+        .expect("cancelled");
+
+        backend.set_remote_artist_mapping(Path::new(ARTIST_DIR), &meta);
+
+        let artist = dir_at(&backend, ARTIST_DIR);
+        assert_eq!(artist.remote_meta(), &Some(RemoteArtistMeta::NoSuitable));
+        assert!(
+            !artist
+                .find_problems()
+                .contains(&Problem::MissingRemoteArtistMapping)
+        );
+
+        let actions = actions_of(&backend, ARTIST_DIR);
+        assert!(actions.contains(&Action::ResetRemoteMapping));
+        assert!(!actions.contains(&Action::MapRemoteTagSource));
+        assert!(!actions.contains(&Action::InstallRemoteTags));
+    }
+
+    #[test]
+    fn a_reset_brings_the_artist_back_to_the_starting_state() {
+        let (_dirs, mut backend) = backend_with_an_artist();
+
+        backend.set_remote_artist_mapping(Path::new(ARTIST_DIR), &RemoteArtistMeta::NoSuitable);
+        backend.reset_remote_artist_mapping(Path::new(ARTIST_DIR));
+
+        let artist = dir_at(&backend, ARTIST_DIR);
+        assert_eq!(artist.remote_meta(), &None);
+        assert!(
+            artist
+                .find_problems()
+                .contains(&Problem::MissingRemoteArtistMapping)
+        );
+
+        let actions = actions_of(&backend, ARTIST_DIR);
+        assert!(actions.contains(&Action::MapRemoteTagSource));
+        assert!(!actions.contains(&Action::ResetRemoteMapping));
+
+        // the mapping written on closing is built out of the tree, so a reset
+        // artist has no entry in it at all
+        assert_eq!(backend.root_dir.create_remote_mapping_recursive().len(), 0);
+    }
+
+    #[test]
+    fn installing_remote_tags_writes_the_artist_into_every_file() {
+        let (dirs, mut backend) = backend_with_an_artist();
+
+        let local_name = backend
+            .artist_local_name(Path::new(ARTIST_DIR))
+            .expect("no artist name");
+
+        let meta = resolve_artist_mapping(
+            &local_name,
+            &remote_universe(),
+            &MockArtistSelector::new(MockChoice::ByName("The Beatles".to_string())),
+        )
+        .expect("request failed")
+        .expect("cancelled");
+
+        backend.set_remote_artist_mapping(Path::new(ARTIST_DIR), &meta);
+
+        let stored = backend
+            .remote_artist_meta(Path::new(ARTIST_DIR))
+            .expect("no mapping");
+        let remote_name = resolve_remote_name(&stored, &remote_universe()).expect("no remote name");
+
+        backend.install_remote_tags(Path::new(ARTIST_DIR), &remote_name);
+
+        assert_eq!(artist_tag_of(dirs.source(), FIRST_SONG), "The Beatles");
+        assert_eq!(artist_tag_of(dirs.source(), SECOND_SONG), "The Beatles");
+
+        // the meta was recalculated, and the renamed artist is still mapped
+        let artist = dir_at(&backend, ARTIST_DIR);
+        assert_eq!(artist.artist_name(), Some("The Beatles"));
+        assert_eq!(
+            artist.remote_meta(),
+            &Some(RemoteArtistMeta::Mapped {
+                id: "123456".to_string(),
+                name: Some("The Beatles".to_string()),
+            })
+        );
+
+        // the artist is known under its remote name now, and that is the only
+        // name the tree can write on closing
+        let saved = backend.root_dir.create_remote_mapping_recursive();
+        assert_eq!(saved.len(), 1);
+        assert!(saved.meta_for("The Beatles").is_some());
+    }
+
+    #[test]
+    fn a_name_of_a_mapping_read_from_the_file_is_requested_by_id() {
+        let (_dirs, mut backend) = backend_with_an_artist();
+
+        backend.set_remote_artist_mapping(
+            Path::new(ARTIST_DIR),
+            &RemoteArtistMeta::Mapped {
+                id: "123456".to_string(),
+                name: Some("The Beatles".to_string()),
+            },
+        );
+
+        // a fresh session reads what was written, and knows the id alone
+        let written = backend.root_dir.create_remote_mapping_recursive();
+        let restored: RemoteArtistMappingDatabase =
+            serde_json::from_str(&serde_json::to_string(&written).unwrap()).unwrap();
+        backend.root_dir.set_remote_mapping_database(&restored);
+
+        let stored = backend
+            .remote_artist_meta(Path::new(ARTIST_DIR))
+            .expect("no mapping");
+        assert_eq!(
+            stored,
+            RemoteArtistMeta::Mapped {
+                id: "123456".to_string(),
+                name: None,
+            }
+        );
+
+        assert_eq!(
+            resolve_remote_name(&stored, &remote_universe()),
+            Ok("The Beatles".to_string())
+        );
     }
 }

@@ -1,6 +1,7 @@
 use crate::{
     Problem, SyncIntention, SyncedEntry,
     music_file::{FsEntryTrait, InvalidFile, MusicFile},
+    remote_tags::{RemoteArtistMappingDatabase, RemoteArtistMeta},
     tags::tags,
 };
 use pathdiff::diff_paths;
@@ -81,6 +82,8 @@ pub struct Directory {
     children: BTreeMap<PathBuf, FsEntry>,
     meta: DirectoryMetadata,
 
+    remote_meta: Option<RemoteArtistMeta>,
+
     pub expanded: bool, // TODO this is from view, not from model, move it
 }
 impl Directory {
@@ -94,6 +97,7 @@ impl Directory {
             relative_path: relative_path.clone(),
             children: children,
             meta: DirectoryMetadata::None,
+            remote_meta: None,
             expanded: false,
         };
 
@@ -105,6 +109,54 @@ impl Directory {
     #[allow(dead_code)]
     pub fn meta(&self) -> &DirectoryMetadata {
         return &self.meta;
+    }
+
+    pub fn is_artist(&self) -> bool {
+        matches!(self.meta, DirectoryMetadata::ArtistMeta(_))
+    }
+
+    // The artist this directory belongs to. An album directory belongs to one
+    // as well, so this is not a check for an artist directory: use 'is_artist'.
+    pub fn artist_name(&self) -> Option<&str> {
+        match &self.meta {
+            DirectoryMetadata::ArtistMeta(artist) => Some(&artist.artist),
+            DirectoryMetadata::AlbumMeta(album) => Some(&album.artist.artist),
+            DirectoryMetadata::None => None,
+        }
+    }
+
+    // The artist name of an artist directory, the key of the remote mapping.
+    pub fn mapped_artist_name(&self) -> Option<&str> {
+        if !self.is_artist() {
+            return None;
+        }
+
+        self.artist_name()
+    }
+
+    pub fn remote_meta(&self) -> &Option<RemoteArtistMeta> {
+        return &self.remote_meta;
+    }
+
+    // An artist directory whose mapping was never requested. Such a directory
+    // is problematic; a "no suitable" one is not.
+    fn is_unmapped_artist(&self) -> bool {
+        self.is_artist() && self.remote_meta.is_none()
+    }
+
+    // Reads the mapping of every artist directory below this one out of the
+    // database. The database is borrowed, not owned: the tree keeps no handle
+    // on it.
+    pub fn set_remote_mapping_database(&mut self, map: &RemoteArtistMappingDatabase) {
+        self.remote_meta = self
+            .mapped_artist_name()
+            .and_then(|name| map.meta_for(name));
+
+        for (_, child) in &mut self.children {
+            if let FsEntry::FsDirectory(d) = child {
+                d.set_remote_mapping_database(map);
+            }
+        }
     }
 
     fn recalc_meta(&mut self) {
@@ -190,13 +242,14 @@ impl Directory {
         &self.children
     }
 
-    pub fn children_recursive(&self) -> Vec<PathBuf> {
+    // TODO return FsEntry?
+    pub fn children_music_files_recursive(&self) -> Vec<PathBuf> {
         let mut ret = Vec::<PathBuf>::new();
 
         for (_, child) in &self.children {
             match child {
                 FsEntry::FsDirectory(d) => {
-                    ret.extend(d.children_recursive());
+                    ret.extend(d.children_music_files_recursive());
                 }
                 FsEntry::FsMusicFile(mf) => {
                     ret.push(mf.relative_path.clone());
@@ -225,6 +278,27 @@ impl Directory {
         }
 
         return map;
+    }
+
+    // Remote mapping of every artist directory below this one. The tree is the
+    // source of truth: the whole file is written out of this on closing.
+    pub fn create_remote_mapping_recursive(&self) -> RemoteArtistMappingDatabase {
+        let mut map = RemoteArtistMappingDatabase::new();
+        self.collect_remote_mapping(&mut map);
+
+        return map;
+    }
+
+    fn collect_remote_mapping(&self, map: &mut RemoteArtistMappingDatabase) {
+        if let (Some(name), Some(meta)) = (self.mapped_artist_name(), &self.remote_meta) {
+            map.set(name, meta);
+        }
+
+        for (_, child) in &self.children {
+            if let FsEntry::FsDirectory(d) = child {
+                d.collect_remote_mapping(map);
+            }
+        }
     }
 
     pub fn find_recursive(&self, rel_path: &Path) -> Option<&FsEntry> {
@@ -271,6 +345,13 @@ impl Directory {
         match self.find_recursive_mut(rel_path) {
             Some(FsEntry::FsMusicFile(mf)) => mf.set_sync_info(sync_entry),
             Some(FsEntry::FsDirectory(d)) => d.set_sync_info(sync_entry),
+            _ => {}
+        }
+    }
+
+    pub fn set_remote_meta_recursive(&mut self, rel_path: &Path, meta: Option<RemoteArtistMeta>) {
+        match self.find_recursive_mut(rel_path) {
+            Some(FsEntry::FsDirectory(d)) if d.is_artist() => d.remote_meta = meta,
             _ => {}
         }
     }
@@ -424,6 +505,10 @@ impl FsEntryTrait for Directory {
     }
 
     fn has_problems(&self) -> bool {
+        if self.is_unmapped_artist() {
+            return true;
+        }
+
         for (_, child) in &self.children {
             match child {
                 FsEntry::FsFile(_) => {
@@ -470,6 +555,10 @@ impl FsEntryTrait for Directory {
             }
 
             ret = ret.intersection(&problems).cloned().collect();
+        }
+
+        if self.is_unmapped_artist() {
+            ret.insert(Problem::MissingRemoteArtistMapping);
         }
 
         return ret;
