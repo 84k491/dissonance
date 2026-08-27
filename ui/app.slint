@@ -22,6 +22,11 @@ export struct ArtistOption {
     index: int,
 }
 
+export struct AlbumOption {
+    label: string,
+    index: int,
+}
+
 export component AppWindow inherits Window {
     title: "Dissonance";
     preferred-width: 900px;
@@ -180,6 +185,47 @@ export component ArtistSelectWindow inherits Window {
     VerticalBox {
         Text {
             text: "Local artist: " + root.local-name;
+        }
+        ListView {
+            vertical-stretch: 1;
+            for o in root.options: HorizontalLayout {
+                Button {
+                    text: o.label;
+                    clicked => { root.chosen(o.index); }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            Button {
+                text: "No suitable";
+                clicked => { root.no-suitable(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+}
+
+// Standalone window shown while a remote album mapping is requested. The
+// worker thread that opened it waits until one of these buttons is pressed.
+export component AlbumSelectWindow inherits Window {
+    title: "Remote album";
+    preferred-width: 520px;
+    preferred-height: 420px;
+
+    in property <string> local-name;
+    in property <[AlbumOption]> options;
+
+    callback chosen(int);
+    callback no-suitable();
+    callback cancel();
+
+    VerticalBox {
+        Text {
+            text: "Local album: " + root.local-name;
         }
         ListView {
             vertical-stretch: 1;

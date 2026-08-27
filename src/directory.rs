@@ -1,7 +1,9 @@
 use crate::{
     Problem, SyncIntention, SyncedEntry,
     music_file::{FsEntryTrait, InvalidFile, MusicFile},
-    remote_tags::{RemoteArtistMappingDatabase, RemoteArtistMeta},
+    remote_tags::{
+        RemoteAlbumMappingDatabase, RemoteAlbumMeta, RemoteArtistMappingDatabase, RemoteArtistMeta,
+    },
     tags::tags,
 };
 use pathdiff::diff_paths;
@@ -82,7 +84,8 @@ pub struct Directory {
     children: BTreeMap<PathBuf, FsEntry>,
     meta: DirectoryMetadata,
 
-    remote_meta: Option<RemoteArtistMeta>,
+    remote_artist_meta: Option<RemoteArtistMeta>,
+    remote_album_meta: Option<RemoteAlbumMeta>,
 
     pub expanded: bool, // TODO this is from view, not from model, move it
 }
@@ -97,7 +100,8 @@ impl Directory {
             relative_path: relative_path.clone(),
             children: children,
             meta: DirectoryMetadata::None,
-            remote_meta: None,
+            remote_artist_meta: None,
+            remote_album_meta: None,
             expanded: false,
         };
 
@@ -113,6 +117,27 @@ impl Directory {
 
     pub fn is_artist(&self) -> bool {
         matches!(self.meta, DirectoryMetadata::ArtistMeta(_))
+    }
+
+    pub fn is_album(&self) -> bool {
+        matches!(self.meta, DirectoryMetadata::AlbumMeta(_))
+    }
+
+    // The name of an album directory, 'None' for anything else.
+    pub fn album_name(&self) -> Option<&str> {
+        match &self.meta {
+            DirectoryMetadata::AlbumMeta(album) => Some(&album.album_name),
+            _ => None,
+        }
+    }
+
+    // How many music files the directory holds. An album directory holds
+    // nothing else, so for one this is its track count.
+    pub fn track_count(&self) -> u32 {
+        self.children
+            .values()
+            .filter(|child| matches!(child, FsEntry::FsMusicFile(_)))
+            .count() as u32
     }
 
     // The artist this directory belongs to. An album directory belongs to one
@@ -134,27 +159,81 @@ impl Directory {
         self.artist_name()
     }
 
-    pub fn remote_meta(&self) -> &Option<RemoteArtistMeta> {
-        return &self.remote_meta;
+    // The (artist, album) pair of an album directory, the key of the remote
+    // album mapping. An album name means nothing on its own, so both halves
+    // are needed.
+    pub fn mapped_album_key(&self) -> Option<(&str, &str)> {
+        if !self.is_album() {
+            return None;
+        }
+
+        Some((self.artist_name()?, self.album_name()?))
+    }
+
+    pub fn remote_artist_meta(&self) -> &Option<RemoteArtistMeta> {
+        return &self.remote_artist_meta;
+    }
+
+    pub fn remote_album_meta(&self) -> &Option<RemoteAlbumMeta> {
+        return &self.remote_album_meta;
+    }
+
+    // The remote name of this directory's own mapping, when it is known. Only a
+    // request or an install can tell one; a mapping read from the file cannot.
+    fn known_remote_artist_name(&self) -> Option<&str> {
+        match &self.remote_artist_meta {
+            Some(RemoteArtistMeta::Mapped {
+                name: Some(name), ..
+            }) => Some(name),
+            _ => None,
+        }
+    }
+
+    fn known_remote_album_name(&self) -> Option<&str> {
+        match &self.remote_album_meta {
+            Some(RemoteAlbumMeta::Mapped {
+                name: Some(name), ..
+            }) => Some(name),
+            _ => None,
+        }
     }
 
     // An artist directory whose mapping was never requested. Such a directory
     // is problematic; a "no suitable" one is not.
     fn is_unmapped_artist(&self) -> bool {
-        self.is_artist() && self.remote_meta.is_none()
+        self.is_artist() && self.remote_artist_meta.is_none()
+    }
+
+    // An album directory whose mapping was never requested. Problematic just
+    // like an unmapped artist, whether or not the artist above is mapped: the
+    // artist fires a problem of its own and is the thing to fix first.
+    fn is_unmapped_album(&self) -> bool {
+        self.is_album() && self.remote_album_meta.is_none()
     }
 
     // Reads the mapping of every artist directory below this one out of the
     // database. The database is borrowed, not owned: the tree keeps no handle
     // on it.
     pub fn set_remote_mapping_database(&mut self, map: &RemoteArtistMappingDatabase) {
-        self.remote_meta = self
+        self.remote_artist_meta = self
             .mapped_artist_name()
             .and_then(|name| map.meta_for(name));
 
         for (_, child) in &mut self.children {
             if let FsEntry::FsDirectory(d) = child {
                 d.set_remote_mapping_database(map);
+            }
+        }
+    }
+
+    pub fn set_remote_album_mapping_database(&mut self, map: &RemoteAlbumMappingDatabase) {
+        self.remote_album_meta = self
+            .mapped_album_key()
+            .and_then(|(artist, album)| map.meta_for(artist, album));
+
+        for (_, child) in &mut self.children {
+            if let FsEntry::FsDirectory(d) = child {
+                d.set_remote_album_mapping_database(map);
             }
         }
     }
@@ -290,13 +369,63 @@ impl Directory {
     }
 
     fn collect_remote_mapping(&self, map: &mut RemoteArtistMappingDatabase) {
-        if let (Some(name), Some(meta)) = (self.mapped_artist_name(), &self.remote_meta) {
+        if let (Some(name), Some(meta)) = (self.mapped_artist_name(), &self.remote_artist_meta) {
             map.set(name, meta);
         }
 
         for (_, child) in &self.children {
             if let FsEntry::FsDirectory(d) = child {
                 d.collect_remote_mapping(map);
+            }
+        }
+    }
+
+    // Remote mapping of every album directory below this one, the album twin of
+    // 'create_remote_mapping_recursive'.
+    pub fn create_remote_album_mapping_recursive(&self) -> RemoteAlbumMappingDatabase {
+        let mut map = RemoteAlbumMappingDatabase::new();
+        self.collect_remote_album_mapping(&mut map, None);
+
+        return map;
+    }
+
+    // 'remote_artist_name' is the remote name of the artist above, when it is
+    // known: an album has to be found again under it as well, because
+    // installing the artist tags renames the artist half of the key.
+    fn collect_remote_album_mapping(
+        &self,
+        map: &mut RemoteAlbumMappingDatabase,
+        remote_artist_name: Option<&str>,
+    ) {
+        if let (Some((artist, album)), Some(meta)) = (self.mapped_album_key(), &self.remote_album_meta)
+        {
+            let mut artists = vec![artist];
+            if let Some(remote) = remote_artist_name {
+                if remote != artist {
+                    artists.push(remote);
+                }
+            }
+
+            let mut albums = vec![album];
+            if let Some(remote) = self.known_remote_album_name() {
+                if remote != album {
+                    albums.push(remote);
+                }
+            }
+
+            map.set(&artists, &albums, meta);
+        }
+
+        // an artist directory tells its albums the remote name it is known by
+        let remote_artist_name = if self.is_artist() {
+            self.known_remote_artist_name()
+        } else {
+            remote_artist_name
+        };
+
+        for (_, child) in &self.children {
+            if let FsEntry::FsDirectory(d) = child {
+                d.collect_remote_album_mapping(map, remote_artist_name);
             }
         }
     }
@@ -351,7 +480,18 @@ impl Directory {
 
     pub fn set_remote_meta_recursive(&mut self, rel_path: &Path, meta: Option<RemoteArtistMeta>) {
         match self.find_recursive_mut(rel_path) {
-            Some(FsEntry::FsDirectory(d)) if d.is_artist() => d.remote_meta = meta,
+            Some(FsEntry::FsDirectory(d)) if d.is_artist() => d.remote_artist_meta = meta,
+            _ => {}
+        }
+    }
+
+    pub fn set_remote_album_meta_recursive(
+        &mut self,
+        rel_path: &Path,
+        meta: Option<RemoteAlbumMeta>,
+    ) {
+        match self.find_recursive_mut(rel_path) {
+            Some(FsEntry::FsDirectory(d)) if d.is_album() => d.remote_album_meta = meta,
             _ => {}
         }
     }
@@ -505,7 +645,7 @@ impl FsEntryTrait for Directory {
     }
 
     fn has_problems(&self) -> bool {
-        if self.is_unmapped_artist() {
+        if self.is_unmapped_artist() || self.is_unmapped_album() {
             return true;
         }
 
@@ -559,6 +699,10 @@ impl FsEntryTrait for Directory {
 
         if self.is_unmapped_artist() {
             ret.insert(Problem::MissingRemoteArtistMapping);
+        }
+
+        if self.is_unmapped_album() {
+            ret.insert(Problem::MissingRemoteAlbumMapping);
         }
 
         return ret;

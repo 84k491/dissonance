@@ -4,7 +4,10 @@ use crate::directory::load_dir_hash_set_files_only;
 use crate::{
     directory::{Directory, FsEntry},
     music_file::{FsEntryTrait, InvalidFile, MusicFile},
-    remote_tags::{RemoteArtistMappingDatabase, RemoteArtistMeta},
+    remote_tags::{
+        RemoteAlbumMappingDatabase, RemoteAlbumMeta, RemoteAlbumTags, RemoteArtistMappingDatabase,
+        RemoteArtistMeta,
+    },
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -24,6 +27,7 @@ static CONFIG_REL_PATH: &str = ".config/dissonance";
 static STATE_FILENAME: &str = "saved_state.json";
 static INDEX_FILENAME: &str = "index.json";
 static REMOTE_ARTIST_MAPPING_FILENAME: &str = "RemoteArtistMapping.json";
+static REMOTE_ALBUM_MAPPING_FILENAME: &str = "RemoteAlbumMapping.json";
 
 // Everything the app persists lives in one directory. Tests point
 // 'DISSONANCE_CONFIG_DIR' at a directory of their own, so that they never touch
@@ -48,6 +52,7 @@ pub enum Problem {
     MissingTrackNumber,
     MissingYear,
     MissingRemoteArtistMapping,
+    MissingRemoteAlbumMapping,
 }
 
 impl Display for Problem {
@@ -69,6 +74,9 @@ pub enum Action {
     MapRemoteTagSource,
     ResetRemoteMapping,
     InstallRemoteTags,
+    MapRemoteAlbumTagSource,
+    ResetRemoteAlbumMapping,
+    InstallRemoteAlbumTags,
 }
 
 impl Display for Action {
@@ -132,6 +140,7 @@ impl Drop for Dissonance {
         let index = self.root_dir.create_index_recursive();
         Self::save_index(index);
         self.save_remote_mapping_database();
+        self.save_remote_album_mapping_database();
         save_state(self.source.clone(), self.destination.clone());
     }
 }
@@ -158,9 +167,12 @@ impl Dissonance {
     pub fn handle_root_loaded(&mut self, nodes: HashSet<PathBuf>) {
         let index = Self::load_index();
         let remote_mapping_database = Self::load_remote_mapping_database();
+        let remote_album_mapping_database = Self::load_remote_album_mapping_database();
         self.root_dir = Directory::from_paths(nodes, self.source.clone().unwrap(), index);
         self.root_dir
             .set_remote_mapping_database(&remote_mapping_database);
+        self.root_dir
+            .set_remote_album_mapping_database(&remote_album_mapping_database);
 
         println!("Source dir loaded");
 
@@ -369,6 +381,53 @@ impl Dissonance {
         }
     }
 
+    fn load_remote_album_mapping_database() -> RemoteAlbumMappingDatabase {
+        let path = config_file_path(REMOTE_ALBUM_MAPPING_FILENAME);
+
+        let file = match File::open(path) {
+            Err(e) => {
+                println!("Failed to open the remote album mapping: {}", e);
+                return RemoteAlbumMappingDatabase::new();
+            }
+            Ok(f) => f,
+        };
+
+        let map: RemoteAlbumMappingDatabase = match serde_json::from_reader(file) {
+            Err(e) => {
+                println!("Failed to parse the remote album mapping: {}", e);
+                return RemoteAlbumMappingDatabase::new();
+            }
+            Ok(m) => m,
+        };
+
+        println!(
+            "Remote album mapping loaded from json: {} albums",
+            map.len()
+        );
+        map
+    }
+
+    fn save_remote_album_mapping(map: &RemoteAlbumMappingDatabase) {
+        let path = config_file_path(REMOTE_ALBUM_MAPPING_FILENAME);
+        match fs::create_dir_all(path.parent().expect("No parent on mapping save")) {
+            Err(e) => println!("Failed to create dir {}: {}", path.display(), e),
+            Ok(_) => {}
+        }
+
+        let file = match File::create(&path) {
+            Err(e) => {
+                println!("Failed to create {}: {}", path.display(), e);
+                return;
+            }
+            Ok(f) => BufWriter::new(f),
+        };
+
+        match serde_json::to_writer_pretty(file, map) {
+            Err(e) => println!("Failed to write to {}: {}", path.display(), e),
+            Ok(_) => println!("Remote album mapping saved: {} albums", map.len()),
+        }
+    }
+
     // TODO why it is used? Avoid?
     pub fn artist_local_name(&self, rel_path: &Path) -> Option<String> {
         match self.root_dir.find_recursive(rel_path) {
@@ -379,7 +438,7 @@ impl Dissonance {
 
     pub fn remote_artist_meta(&self, rel_path: &Path) -> Option<RemoteArtistMeta> {
         match self.root_dir.find_recursive(rel_path) {
-            Some(FsEntry::FsDirectory(d)) => d.remote_meta().clone(),
+            Some(FsEntry::FsDirectory(d)) => d.remote_artist_meta().clone(),
             _ => None,
         }
     }
@@ -404,6 +463,55 @@ impl Dissonance {
         }
 
         Self::save_remote_mapping(&self.root_dir.create_remote_mapping_recursive());
+    }
+
+    fn save_remote_album_mapping_database(&self) {
+        if self.root_dir.children().is_empty() {
+            return;
+        }
+
+        Self::save_remote_album_mapping(&self.root_dir.create_remote_album_mapping_recursive());
+    }
+
+    pub fn local_album_name_and_track_count(&self, rel_path: &Path) -> Option<(String, u32)> {
+        match self.root_dir.find_recursive(rel_path) {
+            Some(FsEntry::FsDirectory(d)) => {
+                let (_, album) = d.mapped_album_key()?;
+                Some((album.to_string(), d.track_count()))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn artist_remote_id_of_album(&self, album_rel_path: &Path) -> Option<String> {
+        let artist_path = album_rel_path.parent()?;
+
+        let artist = match self.root_dir.find_recursive(artist_path) {
+            Some(FsEntry::FsDirectory(d)) if d.is_artist() => d,
+            _ => return None,
+        };
+
+        match artist.remote_artist_meta() {
+            Some(RemoteArtistMeta::Mapped { id, .. }) => Some(id.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn remote_album_meta(&self, rel_path: &Path) -> Option<RemoteAlbumMeta> {
+        match self.root_dir.find_recursive(rel_path) {
+            Some(FsEntry::FsDirectory(d)) => d.remote_album_meta().clone(),
+            _ => None,
+        }
+    }
+
+    pub fn set_remote_album_mapping(&mut self, rel_path: &Path, meta: &RemoteAlbumMeta) {
+        self.root_dir
+            .set_remote_album_meta_recursive(rel_path, Some(meta.clone()));
+    }
+
+    pub fn reset_remote_album_mapping(&mut self, rel_path: &Path) {
+        self.root_dir
+            .set_remote_album_meta_recursive(rel_path, None);
     }
 
     pub fn install_remote_tags(&mut self, rel_path: &Path, remote_name: &str) {
@@ -436,8 +544,68 @@ impl Dissonance {
                 id,
                 name: Some(remote_name.to_string()),
             };
-            self.root_dir.set_remote_meta_recursive(rel_path, Some(named));
+            self.root_dir
+                .set_remote_meta_recursive(rel_path, Some(named));
         }
+    }
+
+    // Writes the remote album name and year into every music file below,
+    // leaving the artist, the title and the track number alone. The files are
+    // not moved, so a 'MismatchedPath' may appear and is fixed by 'MoveFile':
+    // both halves of an album directory name are tag based.
+    pub fn install_remote_album_tags(&mut self, rel_path: &Path, remote: &RemoteAlbumTags) {
+        let files = match self.root_dir.find_recursive(rel_path) {
+            Some(FsEntry::FsDirectory(d)) => d.children_music_files_recursive(),
+            _ => return,
+        };
+
+        for file in files {
+            let sync_data = match self.root_dir.find_recursive(&file) {
+                Some(FsEntry::FsMusicFile(mf)) => mf.sync_data.clone(),
+                _ => continue,
+            };
+
+            self.write_album_tags(&file, remote);
+
+            // read the file again, so that its problems and the meta of every
+            // directory above it are recalculated. Only the node of the tree is
+            // dropped here, never the file itself
+            if !self.root_dir.remove_entry_recursive(&file) {
+                println!("Failed to forget file: {}", file.display());
+            }
+            self.root_dir.add_entry_recursive(&file, sync_data);
+        }
+
+        // the requested tags are kept on the album itself, so that the mapping
+        // written on closing holds the remote name as well as the local one
+        if let Some(RemoteAlbumMeta::Mapped { id, .. }) = self.remote_album_meta(rel_path) {
+            let named = RemoteAlbumMeta::Mapped {
+                id,
+                name: Some(remote.name.clone()),
+            };
+            self.root_dir
+                .set_remote_album_meta_recursive(rel_path, Some(named));
+        }
+    }
+
+    // Replaces the album and the year of one music file, keeping every other
+    // tag of it.
+    fn write_album_tags(&self, rel_path: &Path, remote: &RemoteAlbumTags) {
+        let mf = match self.root_dir.find_recursive(rel_path) {
+            Some(FsEntry::FsMusicFile(mf)) => mf,
+            _ => return,
+        };
+
+        let mut tags = mf.tags();
+        tags.album = remote.name.clone();
+
+        // an empty year means the source told none: emptying the local one
+        // would only turn into a 'MissingYear' problem
+        if !remote.year.is_empty() {
+            tags.year = remote.year.clone();
+        }
+
+        mf.set_tags(&tags);
     }
 
     // Replaces the artist of one music file, keeping every other tag of it.
@@ -620,7 +788,7 @@ impl Dissonance {
             }
         }
 
-        match d.remote_meta() {
+        match d.remote_artist_meta() {
             None => {
                 if d.is_artist() {
                     actions.insert(Action::MapRemoteTagSource);
@@ -632,6 +800,25 @@ impl Dissonance {
             Some(RemoteArtistMeta::Mapped { .. }) => {
                 actions.insert(Action::InstallRemoteTags);
                 actions.insert(Action::ResetRemoteMapping);
+            }
+        }
+
+        if d.is_album() {
+            match d.remote_album_meta() {
+                None => {
+                    // an album is searched among the albums of a remote artist,
+                    // so the artist above has to be mapped first
+                    if self.artist_remote_id_of_album(&d.relative_path).is_some() {
+                        actions.insert(Action::MapRemoteAlbumTagSource);
+                    }
+                }
+                Some(RemoteAlbumMeta::NoSuitable) => {
+                    actions.insert(Action::ResetRemoteAlbumMapping);
+                }
+                Some(RemoteAlbumMeta::Mapped { .. }) => {
+                    actions.insert(Action::InstallRemoteAlbumTags);
+                    actions.insert(Action::ResetRemoteAlbumMapping);
+                }
             }
         }
 
@@ -656,7 +843,7 @@ impl Dissonance {
                     actions.insert(Action::FixCharacters);
                 }
                 // the mapping actions are picked by the remote meta above
-                Problem::MissingRemoteArtistMapping => {}
+                Problem::MissingRemoteArtistMapping | Problem::MissingRemoteAlbumMapping => {}
             }
         }
 
@@ -988,9 +1175,14 @@ mod tests {
         directory::{Directory, FsEntry},
         music_file::{FsEntryTrait, MusicFile},
         remote_tags::{
+            RemoteAlbumMappingDatabase, RemoteAlbumMeta, RemoteAlbumTags,
             RemoteArtistMappingDatabase, RemoteArtistMeta,
-            mocks::{MockArtistSelector, MockChoice, MockRemoteInfoProvider},
-            resolve_artist_mapping, resolve_remote_name,
+            mocks::{
+                MockAlbumChoice, MockAlbumSelector, MockArtistSelector, MockChoice,
+                MockRemoteInfoProvider,
+            },
+            resolve_album_mapping, resolve_artist_mapping, resolve_remote_album_tags,
+            resolve_remote_name,
         },
     };
     use std::{
@@ -1154,6 +1346,7 @@ mod tests {
     }
 
     static ARTIST_DIR: &str = "Beatles";
+    static ALBUM_DIR: &str = "Beatles/[1966] Revolver";
     static FIRST_SONG: &str = "Beatles/[1966] Revolver/[01] Taxman.mp3";
     static SECOND_SONG: &str = "Beatles/[1966] Revolver/[02] Eleanor Rigby.mp3";
 
@@ -1162,6 +1355,19 @@ mod tests {
             ("123456", "The Beatles"),
             ("890123468", "Beatles Tribute Band"),
             ("555", "Jack Johnson"),
+        ])
+    }
+
+    fn remote_album_universe() -> MockRemoteInfoProvider {
+        remote_universe().with_albums(&[
+            ("123456", "1642995371", "Revolver (2022 Mix)", "2022", 14),
+            (
+                "123456",
+                "1441164426",
+                "Abbey Road (Remastered)",
+                "1969",
+                19,
+            ),
         ])
     }
 
@@ -1231,8 +1437,75 @@ mod tests {
         backend
             .root_dir
             .set_remote_mapping_database(&RemoteArtistMappingDatabase::new());
+        backend
+            .root_dir
+            .set_remote_album_mapping_database(&RemoteAlbumMappingDatabase::new());
 
         (dirs, backend)
+    }
+
+    // The same tree, with the artist mapped: an album is only ever searched
+    // among the albums of a mapped artist.
+    fn backend_with_a_mapped_artist() -> (TestDirs, Dissonance) {
+        let (dirs, mut backend) = backend_with_an_artist();
+
+        let meta = resolve_artist_mapping(
+            "Beatles",
+            &remote_album_universe(),
+            &MockArtistSelector::new(MockChoice::ByName("The Beatles".to_string())),
+        )
+        .expect("request failed")
+        .expect("cancelled");
+
+        backend.set_remote_artist_mapping(Path::new(ARTIST_DIR), &meta);
+
+        (dirs, backend)
+    }
+
+    // Maps the album onto "Revolver (2022 Mix)" and answers with its meta.
+    fn map_the_album(backend: &mut Dissonance) -> RemoteAlbumMeta {
+        let artist_id = backend
+            .artist_remote_id_of_album(Path::new(ALBUM_DIR))
+            .expect("the artist is not mapped");
+        let (local_name, track_count) = backend
+            .local_album_name_and_track_count(Path::new(ALBUM_DIR))
+            .expect("no album name");
+
+        let meta = resolve_album_mapping(
+            &artist_id,
+            &local_name,
+            track_count,
+            &remote_album_universe(),
+            &MockAlbumSelector::new(MockAlbumChoice::ByName("Revolver (2022 Mix)".to_string())),
+        )
+        .expect("request failed")
+        .expect("cancelled");
+
+        backend.set_remote_album_mapping(Path::new(ALBUM_DIR), &meta);
+
+        meta
+    }
+
+    fn year_tag_of(base: &Path, rel: &str) -> String {
+        MusicFile::from(
+            &base.to_path_buf(),
+            &PathBuf::from(rel),
+            SyncIntention::Unspecified,
+        )
+        .expect("not a music file")
+        .tags()
+        .year
+    }
+
+    fn album_tag_of(base: &Path, rel: &str) -> String {
+        MusicFile::from(
+            &base.to_path_buf(),
+            &PathBuf::from(rel),
+            SyncIntention::Unspecified,
+        )
+        .expect("not a music file")
+        .tags()
+        .album
     }
 
     fn dir_at<'a>(backend: &'a Dissonance, rel_path: &str) -> &'a Directory {
@@ -1257,7 +1530,7 @@ mod tests {
 
         let artist = dir_at(&backend, ARTIST_DIR);
         assert_eq!(artist.artist_name(), Some("Beatles"));
-        assert_eq!(artist.remote_meta(), &None);
+        assert_eq!(artist.remote_artist_meta(), &None);
         assert!(artist.has_problems());
         assert!(
             artist
@@ -1350,7 +1623,10 @@ mod tests {
         backend.set_remote_artist_mapping(Path::new(ARTIST_DIR), &meta);
 
         let artist = dir_at(&backend, ARTIST_DIR);
-        assert_eq!(artist.remote_meta(), &Some(RemoteArtistMeta::NoSuitable));
+        assert_eq!(
+            artist.remote_artist_meta(),
+            &Some(RemoteArtistMeta::NoSuitable)
+        );
         assert!(
             !artist
                 .find_problems()
@@ -1371,7 +1647,7 @@ mod tests {
         backend.reset_remote_artist_mapping(Path::new(ARTIST_DIR));
 
         let artist = dir_at(&backend, ARTIST_DIR);
-        assert_eq!(artist.remote_meta(), &None);
+        assert_eq!(artist.remote_artist_meta(), &None);
         assert!(
             artist
                 .find_problems()
@@ -1419,7 +1695,7 @@ mod tests {
         let artist = dir_at(&backend, ARTIST_DIR);
         assert_eq!(artist.artist_name(), Some("The Beatles"));
         assert_eq!(
-            artist.remote_meta(),
+            artist.remote_artist_meta(),
             &Some(RemoteArtistMeta::Mapped {
                 id: "123456".to_string(),
                 name: Some("The Beatles".to_string()),
@@ -1466,5 +1742,298 @@ mod tests {
             resolve_remote_name(&stored, &remote_universe()),
             Ok("The Beatles".to_string())
         );
+    }
+
+    #[test]
+    fn an_unmapped_album_offers_no_request_until_the_artist_is_mapped() {
+        let (_dirs, backend) = backend_with_an_artist();
+
+        let album = dir_at(&backend, ALBUM_DIR);
+        assert!(album.is_album());
+        assert_eq!(album.mapped_album_key(), Some(("Beatles", "Revolver")));
+        assert_eq!(album.track_count(), 2);
+
+        // an unmapped album is problematic whether or not its artist is mapped
+        assert!(album.has_problems());
+        assert!(
+            album
+                .find_problems()
+                .contains(&Problem::MissingRemoteAlbumMapping)
+        );
+
+        // but there is nothing to search among until the artist is mapped
+        assert_eq!(
+            backend.artist_remote_id_of_album(Path::new(ALBUM_DIR)),
+            None
+        );
+        let actions = actions_of(&backend, ALBUM_DIR);
+        assert!(!actions.contains(&Action::MapRemoteAlbumTagSource));
+        assert!(!actions.contains(&Action::ResetRemoteAlbumMapping));
+        assert!(!actions.contains(&Action::InstallRemoteAlbumTags));
+    }
+
+    #[test]
+    fn an_unmapped_album_under_a_mapped_artist_offers_the_request() {
+        let (_dirs, backend) = backend_with_a_mapped_artist();
+
+        assert_eq!(
+            backend.artist_remote_id_of_album(Path::new(ALBUM_DIR)),
+            Some("123456".to_string())
+        );
+
+        let actions = actions_of(&backend, ALBUM_DIR);
+        assert!(actions.contains(&Action::MapRemoteAlbumTagSource));
+        assert!(!actions.contains(&Action::ResetRemoteAlbumMapping));
+        assert!(!actions.contains(&Action::InstallRemoteAlbumTags));
+
+        // the artist directory above is not an album and is never asked. It
+        // does report the album's problem, because a directory reports the
+        // problems common to its children, but it claims no mapping of its own
+        let artist = dir_at(&backend, ARTIST_DIR);
+        assert_eq!(artist.mapped_album_key(), None);
+        assert_eq!(artist.remote_album_meta(), &None);
+        assert!(!actions_of(&backend, ARTIST_DIR).contains(&Action::MapRemoteAlbumTagSource));
+    }
+
+    #[test]
+    fn mapping_an_album_stores_it_under_every_known_name() {
+        let (_dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        assert_eq!(
+            backend.remote_album_meta(Path::new(ALBUM_DIR)),
+            Some(RemoteAlbumMeta::Mapped {
+                id: "1642995371".to_string(),
+                name: Some("Revolver (2022 Mix)".to_string()),
+            })
+        );
+
+        // both names of the artist and both names of the album
+        let saved = backend.root_dir.create_remote_album_mapping_recursive();
+        assert_eq!(saved.len(), 4);
+        assert!(saved.meta_for("Beatles", "Revolver").is_some());
+        assert!(saved.meta_for("Beatles", "Revolver (2022 Mix)").is_some());
+        assert!(saved.meta_for("The Beatles", "Revolver").is_some());
+        assert!(
+            saved
+                .meta_for("The Beatles", "Revolver (2022 Mix)")
+                .is_some()
+        );
+
+        let album = dir_at(&backend, ALBUM_DIR);
+        assert!(
+            !album
+                .find_problems()
+                .contains(&Problem::MissingRemoteAlbumMapping)
+        );
+
+        let actions = actions_of(&backend, ALBUM_DIR);
+        assert!(actions.contains(&Action::InstallRemoteAlbumTags));
+        assert!(actions.contains(&Action::ResetRemoteAlbumMapping));
+        assert!(!actions.contains(&Action::MapRemoteAlbumTagSource));
+    }
+
+    #[test]
+    fn album_no_suitable_fires_no_problem_and_offers_the_reset_only() {
+        let (_dirs, mut backend) = backend_with_a_mapped_artist();
+
+        backend.set_remote_album_mapping(Path::new(ALBUM_DIR), &RemoteAlbumMeta::NoSuitable);
+
+        let album = dir_at(&backend, ALBUM_DIR);
+        assert_eq!(
+            album.remote_album_meta(),
+            &Some(RemoteAlbumMeta::NoSuitable)
+        );
+        assert!(
+            !album
+                .find_problems()
+                .contains(&Problem::MissingRemoteAlbumMapping)
+        );
+
+        let actions = actions_of(&backend, ALBUM_DIR);
+        assert!(actions.contains(&Action::ResetRemoteAlbumMapping));
+        assert!(!actions.contains(&Action::MapRemoteAlbumTagSource));
+        assert!(!actions.contains(&Action::InstallRemoteAlbumTags));
+
+        // a "no suitable" album is written, so that it is not asked again. The
+        // artist above is mapped and its remote name is known, so the album is
+        // written under both names the artist can be found by
+        let saved = backend.root_dir.create_remote_album_mapping_recursive();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(
+            saved.meta_for("Beatles", "Revolver"),
+            Some(RemoteAlbumMeta::NoSuitable)
+        );
+        assert_eq!(
+            saved.meta_for("The Beatles", "Revolver"),
+            Some(RemoteAlbumMeta::NoSuitable)
+        );
+    }
+
+    #[test]
+    fn an_album_reset_brings_it_back_to_the_starting_state() {
+        let (_dirs, mut backend) = backend_with_a_mapped_artist();
+
+        backend.set_remote_album_mapping(Path::new(ALBUM_DIR), &RemoteAlbumMeta::NoSuitable);
+        backend.reset_remote_album_mapping(Path::new(ALBUM_DIR));
+
+        let album = dir_at(&backend, ALBUM_DIR);
+        assert_eq!(album.remote_album_meta(), &None);
+        assert!(
+            album
+                .find_problems()
+                .contains(&Problem::MissingRemoteAlbumMapping)
+        );
+
+        let actions = actions_of(&backend, ALBUM_DIR);
+        assert!(actions.contains(&Action::MapRemoteAlbumTagSource));
+        assert!(!actions.contains(&Action::ResetRemoteAlbumMapping));
+
+        // the mapping written on closing is built out of the tree, so a reset
+        // album has no entry in it at all
+        assert_eq!(
+            backend
+                .root_dir
+                .create_remote_album_mapping_recursive()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn installing_remote_album_tags_writes_the_album_into_every_file() {
+        let (dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        let stored = backend
+            .remote_album_meta(Path::new(ALBUM_DIR))
+            .expect("no mapping");
+        let remote =
+            resolve_remote_album_tags(&stored, &remote_album_universe()).expect("no remote tags");
+
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote);
+
+        assert_eq!(
+            album_tag_of(dirs.source(), FIRST_SONG),
+            "Revolver (2022 Mix)"
+        );
+        assert_eq!(
+            album_tag_of(dirs.source(), SECOND_SONG),
+            "Revolver (2022 Mix)"
+        );
+
+        // the remote year went into every file, the local 1966 is gone
+        assert_eq!(year_tag_of(dirs.source(), FIRST_SONG), "2022");
+        assert_eq!(year_tag_of(dirs.source(), SECOND_SONG), "2022");
+
+        // the artist, the title and the track number are left alone
+        assert_eq!(artist_tag_of(dirs.source(), FIRST_SONG), "Beatles");
+        let first = match backend.root_dir.find_recursive(Path::new(FIRST_SONG)) {
+            Some(FsEntry::FsMusicFile(mf)) => mf.tags(),
+            _ => panic!("expected a music file"),
+        };
+        assert_eq!(first.title, "Taxman");
+        assert_eq!(first.track_number, "1");
+
+        // the meta was recalculated, and the renamed album is still mapped
+        let album = dir_at(&backend, ALBUM_DIR);
+        assert_eq!(album.album_name(), Some("Revolver (2022 Mix)"));
+        assert_eq!(
+            album.remote_album_meta(),
+            &Some(RemoteAlbumMeta::Mapped {
+                id: "1642995371".to_string(),
+                name: Some("Revolver (2022 Mix)".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_remote_year_leaves_the_local_year_alone() {
+        let (dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        // a source that told no year for this album
+        backend.install_remote_album_tags(
+            Path::new(ALBUM_DIR),
+            &RemoteAlbumTags {
+                name: "Revolver (2022 Mix)".to_string(),
+                year: String::new(),
+            },
+        );
+
+        assert_eq!(
+            album_tag_of(dirs.source(), FIRST_SONG),
+            "Revolver (2022 Mix)"
+        );
+
+        // emptying it would only turn into a 'MissingYear' problem
+        assert_eq!(year_tag_of(dirs.source(), FIRST_SONG), "1966");
+        assert!(
+            !dir_at(&backend, ALBUM_DIR)
+                .find_problems()
+                .contains(&Problem::MissingYear)
+        );
+    }
+
+    #[test]
+    fn an_installed_album_name_leaves_a_path_problem_that_move_file_fixes() {
+        let (dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        backend.install_remote_album_tags(
+            Path::new(ALBUM_DIR),
+            &RemoteAlbumTags {
+                name: "Revolver (2022 Mix)".to_string(),
+                year: "2022".to_string(),
+            },
+        );
+
+        // the files were not moved, so the path no longer matches the tags
+        assert!(
+            dir_at(&backend, ALBUM_DIR)
+                .find_problems()
+                .contains(&Problem::MismatchedPath)
+        );
+
+        backend.move_entry_to_tag_based_path(PathBuf::from(ALBUM_DIR));
+
+        // the installed year is part of the directory name as well
+        let moved = "Beatles/[2022] Revolver (2022 Mix)/[01] Taxman.mp3";
+        assert!(dirs.source().join(moved).exists());
+        assert!(!dirs.source().join(FIRST_SONG).exists());
+
+        let album = dir_at(&backend, "Beatles/[2022] Revolver (2022 Mix)");
+        assert!(!album.find_problems().contains(&Problem::MismatchedPath));
+    }
+
+    #[test]
+    fn an_album_name_read_from_the_file_is_requested_by_id() {
+        let (_dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        // a fresh session reads what was written, and knows the id alone
+        let written = backend.root_dir.create_remote_album_mapping_recursive();
+        let restored: RemoteAlbumMappingDatabase =
+            serde_json::from_str(&serde_json::to_string(&written).unwrap()).unwrap();
+        backend
+            .root_dir
+            .set_remote_album_mapping_database(&restored);
+
+        let stored = backend
+            .remote_album_meta(Path::new(ALBUM_DIR))
+            .expect("no mapping");
+        assert_eq!(
+            stored,
+            RemoteAlbumMeta::Mapped {
+                id: "1642995371".to_string(),
+                name: None,
+            }
+        );
+
+        // one request tells the name and the year together
+        let remote =
+            resolve_remote_album_tags(&stored, &remote_album_universe()).expect("no remote tags");
+        assert_eq!(remote.name, "Revolver (2022 Mix)");
+        assert_eq!(remote.year, "2022");
     }
 }

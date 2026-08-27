@@ -13,6 +13,7 @@ pub(crate) use crate::directory::FsEntry;
 pub(crate) use crate::dissonance::{Problem, SyncIntention, SyncedEntry};
 
 use crate::{
+    album_selector::ModalAlbumSelector,
     artist_selector::ModalArtistSelector,
     directory::load_dir_hash_set_files_only,
     dissonance::{
@@ -21,9 +22,13 @@ use crate::{
     },
     itunes::HttpRemoteInfoProvider,
     music_file::FsEntryTrait,
-    remote_tags::{RemoteArtistMeta, resolve_artist_mapping, resolve_remote_name},
+    remote_tags::{
+        RemoteAlbumMeta, RemoteArtistMeta, resolve_album_mapping, resolve_artist_mapping,
+        resolve_remote_album_tags, resolve_remote_name,
+    },
 };
 
+mod album_selector;
 mod artist_selector;
 mod directory;
 mod dissonance;
@@ -303,6 +308,19 @@ fn on_action_clicked(
                 start_remote_tags_install(path, weak.clone(), backend.clone(), selected.clone());
                 return;
             }
+            "MapRemoteAlbumTagSource" => {
+                start_album_mapping(path, weak.clone(), backend.clone(), selected.clone());
+                return;
+            }
+            "InstallRemoteAlbumTags" => {
+                start_remote_album_tags_install(
+                    path,
+                    weak.clone(),
+                    backend.clone(),
+                    selected.clone(),
+                );
+                return;
+            }
             _ => {}
         }
 
@@ -320,6 +338,7 @@ fn on_action_clicked(
                 *selected.lock().unwrap() = new_path;
             }
             "ResetRemoteMapping" => b.reset_remote_artist_mapping(&path),
+            "ResetRemoteAlbumMapping" => b.reset_remote_album_mapping(&path),
             "ForceSync" => b.set_sync_intention(path, SyncIntention::ForceSync),
             "KeepSync" => b.set_sync_intention(path, SyncIntention::KeepSync),
             "DropSync" => b.set_sync_intention(path, SyncIntention::DropSync),
@@ -380,6 +399,71 @@ fn start_remote_tags_install(
 
         apply_on_ui_thread(weak, backend, selected, move |b| {
             b.install_remote_tags(&path, &remote_name)
+        });
+    });
+}
+
+fn start_album_mapping(path: PathBuf, weak: Weak<AppWindow>, backend: Backend, selected: Selected) {
+    // everything the request needs is read under the lock, once
+    let request = {
+        let b = backend.lock().unwrap();
+        b.artist_remote_id_of_album(&path)
+            .zip(b.local_album_name_and_track_count(&path))
+    };
+    let Some((artist_id, (local_name, track_count))) = request else {
+        return;
+    };
+
+    thread::spawn(move || {
+        let provider = HttpRemoteInfoProvider::new();
+        let selector = ModalAlbumSelector {};
+
+        let meta = match resolve_album_mapping(
+            &artist_id,
+            &local_name,
+            track_count,
+            &provider,
+            &selector,
+        ) {
+            Err(e) => {
+                println!("Failed to map album '{}': {}", local_name, e);
+                return;
+            }
+            // cancelled, the state stays as it was
+            Ok(None) => return,
+            Ok(Some(meta)) => meta,
+        };
+
+        apply_on_ui_thread(weak, backend, selected, move |b| {
+            b.set_remote_album_mapping(&path, &meta)
+        });
+    });
+}
+
+fn start_remote_album_tags_install(
+    path: PathBuf,
+    weak: Weak<AppWindow>,
+    backend: Backend,
+    selected: Selected,
+) {
+    let meta = { backend.lock().unwrap().remote_album_meta(&path) };
+    let Some(meta) = meta else {
+        return;
+    };
+
+    thread::spawn(move || {
+        let provider = HttpRemoteInfoProvider::new();
+
+        let remote = match resolve_remote_album_tags(&meta, &provider) {
+            Err(e) => {
+                println!("Failed to get the remote album tags: {}", e);
+                return;
+            }
+            Ok(tags) => tags,
+        };
+
+        apply_on_ui_thread(weak, backend, selected, move |b| {
+            b.install_remote_album_tags(&path, &remote)
         });
     });
 }
@@ -483,6 +567,19 @@ fn remote_meta_line(meta: &Option<RemoteArtistMeta>) -> String {
     }
 }
 
+/// How the mapping of an album directory is shown in the info panel.
+fn remote_album_meta_line(meta: &Option<RemoteAlbumMeta>) -> String {
+    match meta {
+        None => "Remote album: not requested".to_string(),
+        Some(RemoteAlbumMeta::NoSuitable) => "Remote album: no suitable".to_string(),
+        Some(RemoteAlbumMeta::Mapped { id, name: None }) => format!("Remote album id: {}", id),
+        Some(RemoteAlbumMeta::Mapped {
+            id,
+            name: Some(name),
+        }) => format!("Remote album: {} ({})", name, id),
+    }
+}
+
 /// Background tint for a tree row, derived from its sync intention. Selected
 /// rows are darkened. Mirrors the old iced `ButtonStyle`.
 fn intention_color(intention: SyncIntention, selected: bool) -> Color {
@@ -547,7 +644,13 @@ fn build_panels(
             // directory can be mapped onto the remote source
             if d.is_artist() {
                 info.push(TextRow {
-                    text: remote_meta_line(d.remote_meta()).into(),
+                    text: remote_meta_line(d.remote_artist_meta()).into(),
+                });
+            }
+
+            if d.is_album() {
+                info.push(TextRow {
+                    text: remote_album_meta_line(d.remote_album_meta()).into(),
                 });
             }
         }
