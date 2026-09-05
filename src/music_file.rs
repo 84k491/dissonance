@@ -58,6 +58,20 @@ fn is_music_file(relative: &PathBuf) -> bool {
     music_file_extensions.contains(ext.as_str())
 }
 
+// What the brackets of a file stem hold, beside the title.
+//
+//   [01] Abcedgh.mp3    -> track 1, no disc
+//   [2-03] SongName.mp3 -> track 3 of disc 2
+//
+// The disc only appears on an album that has more than one, so a stem without
+// it says nothing about the disc rather than saying "disc one".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StemNumbers {
+    pub title: String,
+    pub track_number: Option<u32>,
+    pub disc_number: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct MusicFile {
     pub base_path: PathBuf,
@@ -105,61 +119,94 @@ impl MusicFile {
             track_number: String::new(),
             year: String::new(),
             has_art: false,
+            disc_number: String::new(),
+            total_discs: String::new(),
         }
     }
 
-    // [01] Abcedgh.mp3
-    // [10] SongName.mp3
-    fn title_and_number_from_file_stem(rel_path: &PathBuf) -> Option<(String, Option<u32>)> {
-        let stem = rel_path.file_stem();
+    fn title_and_number_from_file_stem(rel_path: &PathBuf) -> Option<StemNumbers> {
+        let stem = rel_path.file_stem()?;
 
-        let stem = if stem.is_some() {
-            String::from(stem.unwrap().to_string_lossy())
-        } else {
-            return None;
+        Some(Self::parse_file_stem(&stem.to_string_lossy()))
+    }
+
+    // The whole stem is the title whenever the brackets are missing or hold
+    // anything but numbers.
+    pub fn parse_file_stem(stem: &str) -> StemNumbers {
+        let untitled = |title: &str| StemNumbers {
+            title: title.to_string(),
+            track_number: None,
+            disc_number: None,
         };
 
         let rest = match stem.strip_prefix('[') {
             Some(r) => r,
-            None => return Some((stem.to_string(), None)),
+            None => return untitled(stem),
         };
 
         let end_bracket_pos = match rest.find(']') {
             Some(pos) => pos,
-            None => return Some((stem.to_string(), None)),
+            None => return untitled(stem),
         };
 
-        let (num_str, remaining) = rest.split_at(end_bracket_pos);
+        let (numbers, remaining) = rest.split_at(end_bracket_pos);
+
+        // "2-03" is a disc and a track, "03" is a track alone
+        let (disc_str, num_str) = match numbers.split_once('-') {
+            Some((disc, num)) => (Some(disc), num),
+            None => (None, numbers),
+        };
 
         let number = match num_str.parse::<u32>() {
             Ok(n) => n,
-            Err(_) => return Some((stem.to_string(), None)),
+            Err(_) => return untitled(stem),
+        };
+
+        let disc = match disc_str {
+            None => None,
+            Some(disc) => match disc.parse::<u32>() {
+                Ok(d) => Some(d),
+                Err(_) => return untitled(stem),
+            },
         };
 
         // Safe: remaining starts with ']'
         let title = remaining[1..].trim_start();
 
-        return Some((title.to_string(), Some(number)));
+        StemNumbers {
+            title: title.to_string(),
+            track_number: Some(number),
+            disc_number: disc,
+        }
     }
 
-    // [10] SongName.mp3
-    fn title_and_number_to_file_stem(title: &str, number: Option<u32>) -> String {
-        if let Some(num) = number {
-            return format!("[{:02}] {}", num, title);
-        }
+    // [10] SongName.mp3, and [2-10] SongName.mp3 on a set of several discs.
+    //
+    // A single disc keeps the plain form: the disc is only worth a rename
+    // where it tells two files of one directory apart.
+    pub fn title_and_number_to_file_stem(
+        title: &str,
+        number: Option<u32>,
+        disc: Option<u32>,
+        total_discs: Option<u32>,
+    ) -> String {
+        let Some(num) = number else {
+            return title.to_string();
+        };
 
-        title.to_string()
+        match (disc, total_discs) {
+            (Some(disc), Some(total)) if total > 1 => format!("[{}-{:02}] {}", disc, num, title),
+            _ => format!("[{:02}] {}", num, title),
+        }
     }
 
     // [1999] AlbumName
+    //
+    // The whole name of the directory, never its "stem": a directory has no
+    // extension, and taking one would cut an album like "Vol. 3 The Subliminal
+    // Verses" down to "Vol" at its last dot.
     pub fn album_and_year_from_dir_name(dir: &PathBuf) -> Option<(String, Option<u32>)> {
-        let stem = dir.file_stem();
-
-        let stem = if stem.is_some() {
-            String::from(stem.unwrap().to_string_lossy())
-        } else {
-            return None;
-        };
+        let stem = String::from(dir.file_name()?.to_string_lossy());
 
         let rest = match stem.strip_prefix('[') {
             Some(r) => r,
@@ -195,13 +242,15 @@ impl MusicFile {
 
     pub fn compose_tags_from_path(&self) -> Tags {
         let mut ret = Self::empty_tags();
-        let track_and_number_opt = Self::title_and_number_from_file_stem(&self.relative_path);
+        let numbers_opt = Self::title_and_number_from_file_stem(&self.relative_path);
 
-        if track_and_number_opt.is_some() {
-            let (title, num) = track_and_number_opt.unwrap();
-            ret.title = title;
-            if let Some(num) = num {
+        if let Some(numbers) = numbers_opt {
+            ret.title = numbers.title;
+            if let Some(num) = numbers.track_number {
                 ret.track_number = num.to_string();
+            }
+            if let Some(disc) = numbers.disc_number {
+                ret.disc_number = disc.to_string();
             }
         }
 
@@ -245,8 +294,12 @@ impl MusicFile {
             Self::dir_name_from_album_and_year(&tags.album, tags.year.parse::<u32>().ok());
         ret.push(album_dir);
 
-        let file_stem =
-            Self::title_and_number_to_file_stem(&tags.title, tags.track_number.parse::<u32>().ok());
+        let file_stem = Self::title_and_number_to_file_stem(
+            &tags.title,
+            tags.track_number.parse::<u32>().ok(),
+            tags.disc_number.parse::<u32>().ok(),
+            tags.total_discs.parse::<u32>().ok(),
+        );
         ret.push(file_stem + "." + ext);
 
         return ret;
@@ -278,6 +331,8 @@ impl MusicFile {
             track_number: String::new(),
             year: String::new(),
             has_art: false,
+            disc_number: String::new(),
+            total_discs: String::new(),
         };
 
         if let Some(title) = tag.title() {
@@ -298,6 +353,14 @@ impl MusicFile {
 
         if let Some(track_number) = tag.track_number() {
             ret.track_number = track_number.to_string();
+        }
+
+        if let Some(disc_number) = tag.disc_number() {
+            ret.disc_number = disc_number.to_string();
+        }
+
+        if let Some(total_discs) = tag.total_discs() {
+            ret.total_discs = total_discs.to_string();
         }
 
         if let Some(year) = tag.year() {
@@ -327,6 +390,16 @@ impl MusicFile {
                 self.relative_path.display(),
                 tags.track_number
             );
+        }
+
+        // a file that says nothing about the set stays that way: a written
+        // "1 of 1" would only be noise
+        if let Ok(dn) = tags.disc_number.parse::<u16>() {
+            tag.set_disc_number(dn);
+        }
+
+        if let Ok(td) = tags.total_discs.parse::<u16>() {
+            tag.set_total_discs(td);
         }
 
         if let Ok(y) = tags.year.parse::<i32>() {
@@ -368,6 +441,12 @@ impl FsEntryTrait for MusicFile {
         let mut path_tags = self.compose_tags_from_path();
         path_tags.track_number = installed_tags.track_number.clone();
 
+        // the stem carries the disc only on a set of several discs, so it can
+        // never disagree with the tags on its own; a stem that does disagree
+        // shows up as a 'MismatchedPath' below
+        path_tags.disc_number = installed_tags.disc_number.clone();
+        path_tags.total_discs = installed_tags.total_discs.clone();
+
         if installed_tags.track_number.is_empty() {
             ret.insert(Problem::MissingTrackNumber);
         }
@@ -404,4 +483,214 @@ fn has_invalid_chars_in_path(rel_path: &PathBuf) -> bool {
     crate::tags::tags::INVALID_CHARS
         .iter()
         .any(|c| str.contains(*c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MusicFile, StemNumbers};
+    use std::path::PathBuf;
+
+    fn numbers(title: &str, track: Option<u32>, disc: Option<u32>) -> StemNumbers {
+        StemNumbers {
+            title: title.to_string(),
+            track_number: track,
+            disc_number: disc,
+        }
+    }
+
+    #[test]
+    fn a_plain_stem_holds_a_track_number_alone() {
+        assert_eq!(
+            MusicFile::parse_file_stem("[01] Abcedgh"),
+            numbers("Abcedgh", Some(1), None)
+        );
+        assert_eq!(
+            MusicFile::parse_file_stem("[10] SongName"),
+            numbers("SongName", Some(10), None)
+        );
+        assert_eq!(
+            MusicFile::parse_file_stem("[100] SongName"),
+            numbers("SongName", Some(100), None)
+        );
+    }
+
+    #[test]
+    fn a_dashed_stem_holds_a_disc_and_a_track() {
+        assert_eq!(
+            MusicFile::parse_file_stem("[2-03] SongName"),
+            numbers("SongName", Some(3), Some(2))
+        );
+        assert_eq!(
+            MusicFile::parse_file_stem("[1-01] SongName"),
+            numbers("SongName", Some(1), Some(1))
+        );
+    }
+
+    #[test]
+    fn anything_but_numbers_in_the_brackets_is_a_title() {
+        // no brackets at all
+        assert_eq!(
+            MusicFile::parse_file_stem("SongName"),
+            numbers("SongName", None, None)
+        );
+
+        // an unclosed bracket
+        assert_eq!(
+            MusicFile::parse_file_stem("[01 SongName"),
+            numbers("[01 SongName", None, None)
+        );
+
+        // words where the numbers belong
+        assert_eq!(
+            MusicFile::parse_file_stem("[live] SongName"),
+            numbers("[live] SongName", None, None)
+        );
+        assert_eq!(
+            MusicFile::parse_file_stem("[a-03] SongName"),
+            numbers("[a-03] SongName", None, None)
+        );
+        assert_eq!(
+            MusicFile::parse_file_stem("[2-b] SongName"),
+            numbers("[2-b] SongName", None, None)
+        );
+
+        // a title of its own that happens to start with a bracket
+        assert_eq!(
+            MusicFile::parse_file_stem("[Untitled]"),
+            numbers("[Untitled]", None, None)
+        );
+    }
+
+    #[test]
+    fn a_title_of_a_stem_is_trimmed_and_may_be_empty() {
+        assert_eq!(
+            MusicFile::parse_file_stem("[03]    SongName"),
+            numbers("SongName", Some(3), None)
+        );
+        assert_eq!(MusicFile::parse_file_stem("[03]"), numbers("", Some(3), None));
+    }
+
+    #[test]
+    fn a_single_disc_is_left_out_of_a_stem() {
+        // nothing known about the set
+        assert_eq!(
+            MusicFile::title_and_number_to_file_stem("SongName", Some(3), None, None),
+            "[03] SongName"
+        );
+
+        // one disc of one
+        assert_eq!(
+            MusicFile::title_and_number_to_file_stem("SongName", Some(3), Some(1), Some(1)),
+            "[03] SongName"
+        );
+
+        // a disc without a count of the set
+        assert_eq!(
+            MusicFile::title_and_number_to_file_stem("SongName", Some(3), Some(2), None),
+            "[03] SongName"
+        );
+    }
+
+    #[test]
+    fn a_set_of_several_discs_puts_the_disc_into_a_stem() {
+        assert_eq!(
+            MusicFile::title_and_number_to_file_stem("SongName", Some(3), Some(2), Some(2)),
+            "[2-03] SongName"
+        );
+        assert_eq!(
+            MusicFile::title_and_number_to_file_stem("SongName", Some(3), Some(1), Some(2)),
+            "[1-03] SongName"
+        );
+        assert_eq!(
+            MusicFile::title_and_number_to_file_stem("SongName", Some(12), Some(10), Some(11)),
+            "[10-12] SongName"
+        );
+    }
+
+    #[test]
+    fn a_stem_without_a_track_number_is_the_title_alone() {
+        assert_eq!(
+            MusicFile::title_and_number_to_file_stem("SongName", None, Some(2), Some(2)),
+            "SongName"
+        );
+    }
+
+    #[test]
+    fn a_stem_survives_a_round_trip() {
+        for (title, track, disc, total) in [
+            ("SongName", Some(3), None, None),
+            ("SongName", Some(3), Some(2), Some(2)),
+            ("SongName", Some(100), Some(11), Some(12)),
+        ] {
+            let stem = MusicFile::title_and_number_to_file_stem(title, track, disc, total);
+            let parsed = MusicFile::parse_file_stem(&stem);
+
+            assert_eq!(parsed.title, title, "stem: {}", stem);
+            assert_eq!(parsed.track_number, track, "stem: {}", stem);
+
+            // the disc only makes it into the stem on a set of several
+            let expected_disc = match total {
+                Some(total) if total > 1 => disc,
+                _ => None,
+            };
+            assert_eq!(parsed.disc_number, expected_disc, "stem: {}", stem);
+        }
+    }
+
+    #[test]
+    fn an_album_directory_holds_a_year_and_a_name() {
+        assert_eq!(
+            MusicFile::album_and_year_from_dir_name(&PathBuf::from("[1999] AlbumName")),
+            Some(("AlbumName".to_string(), Some(1999)))
+        );
+        assert_eq!(
+            MusicFile::album_and_year_from_dir_name(&PathBuf::from("AlbumName")),
+            Some(("AlbumName".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn a_dot_in_an_album_name_is_not_an_extension() {
+        // a directory has no extension: cutting one off at the last dot used
+        // to leave "Vol" alone, and no tag could ever agree with that
+        assert_eq!(
+            MusicFile::album_and_year_from_dir_name(&PathBuf::from(
+                "[2004] Vol. 3 The Subliminal Verses"
+            )),
+            Some(("Vol. 3 The Subliminal Verses".to_string(), Some(2004)))
+        );
+        assert_eq!(
+            MusicFile::album_and_year_from_dir_name(&PathBuf::from("Vol. 3")),
+            Some(("Vol. 3".to_string(), None))
+        );
+        assert_eq!(
+            MusicFile::album_and_year_from_dir_name(&PathBuf::from("[1999] ...And Justice for All")),
+            Some(("...And Justice for All".to_string(), Some(1999)))
+        );
+    }
+
+    #[test]
+    fn an_album_directory_of_a_whole_path_is_the_last_one() {
+        assert_eq!(
+            MusicFile::album_and_year_from_dir_name(&PathBuf::from(
+                "Slipknot/[2004] Vol. 3 The Subliminal Verses"
+            )),
+            Some(("Vol. 3 The Subliminal Verses".to_string(), Some(2004)))
+        );
+    }
+
+    #[test]
+    fn an_album_name_survives_a_round_trip_through_a_directory_name() {
+        for (album, year) in [
+            ("Vol. 3 The Subliminal Verses", Some(2004)),
+            ("Revolver", Some(1966)),
+            ("...And Justice for All", Some(1988)),
+            ("Untitled", None),
+        ] {
+            let dir = MusicFile::dir_name_from_album_and_year(album, year);
+            let parsed = MusicFile::album_and_year_from_dir_name(&PathBuf::from(&dir));
+
+            assert_eq!(parsed, Some((album.to_string(), year)), "dir: {}", dir);
+        }
+    }
 }

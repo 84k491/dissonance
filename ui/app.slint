@@ -27,6 +27,11 @@ export struct AlbumOption {
     index: int,
 }
 
+export struct TrackOption {
+    label: string,
+    index: int,
+}
+
 export component AppWindow inherits Window {
     title: "Dissonance";
     preferred-width: 900px;
@@ -244,6 +249,52 @@ export component AlbumSelectWindow inherits Window {
             }
             Button {
                 text: "Cancel";
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+}
+
+// Standalone window shown for a local file that no remote track was alike
+// enough to be matched to on its own. The worker thread that opened it waits
+// until one of these buttons is pressed.
+export component TrackSelectWindow inherits Window {
+    title: "Remote track";
+    preferred-width: 520px;
+    preferred-height: 420px;
+
+    in property <string> local-name;
+    in property <string> album-name;
+    in property <[TrackOption]> options;
+
+    callback chosen(int);
+    callback skip();
+    callback cancel();
+
+    VerticalBox {
+        Text {
+            text: "Local file: " + root.local-name;
+        }
+        Text {
+            text: "Album: " + root.album-name;
+        }
+        ListView {
+            vertical-stretch: 1;
+            for o in root.options: HorizontalLayout {
+                Button {
+                    text: o.label;
+                    clicked => { root.chosen(o.index); }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            Button {
+                text: "Skip file";
+                clicked => { root.skip(); }
+            }
+            Button {
+                text: "Cancel install";
                 clicked => { root.cancel(); }
             }
         }

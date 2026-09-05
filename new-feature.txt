@@ -110,3 +110,54 @@ HTTP client: reqwest with the "blocking" feature. iTunes urls appear in src/itun
 Unit tests must not write into the config directory of a real run, so
 config_file_path() honours the "DISSONANCE_CONFIG_DIR" env variable and the tests point it at a
 temp directory.
+
+Final step: mapping the tracks of an album
+------------------------------------------
+
+Installing an album's tags now also numbers and names every file below it, in
+the very same action, "InstallRemoteAlbumTags".
+
+The remote track list is asked for once, at the start, and kept as a pool. A
+track that is taken leaves the pool, so no two local files can end up on one
+remote track. The pool is emptied in two passes:
+
+    1. Every pair of a local file and a remote track whose names are 99% alike
+       or more is matched with no user at all, the closest pair first, so that
+       an early file cannot take a track that fits a later one better.
+
+    2. Whatever is left over is put to the user, one file at a time, ranked
+       against what is left of the pool. The modal offers "Skip file", which
+       leaves that one file's title and numbers alone, and "Cancel install",
+       which drops the whole thing: not one file of the album is touched.
+
+The local side of the comparison is the file name, free of its numbers, never
+the title tag: the tags are exactly what is not trusted here.
+
+What an install writes into a matched file: the album name, the year, the remote
+artist, the title, the track number and the disc numbers. A skipped file takes
+the album name, the year and the artist all the same.
+
+The flow is pure, like the two mapping flows above it:
+    resolve_album_track_mapping(album_id, &[LocalTrack], &dyn RemoteInfoProvider,
+                                &dyn TrackSelector)
+        -> Result<Option<Vec<(PathBuf, RemoteTrackTags)>>, String>
+'Ok(None)' is the cancel. The provider gains (albumId) -> trackList, and there
+is a "TrackSelector" trait beside the artist and the album ones, faked in tests
+by "MockTrackSelector".
+
+Disc numbers
+------------
+
+"Tags" carries "disc_number" and "total_discs" now; before this they were read
+by nobody and wiped by every write, because 'set_tags' builds a fresh tag.
+
+A file name only grows a disc when the set actually holds more than one:
+
+    [07] Taxman.mp3        a single disc, or nothing known about the set
+    [2-01] Birthday.mp3    disc 2 of a set of 2
+
+so nothing already on disk is renamed by this, and a flat album directory can
+still hold two tracks numbered one. The stem carries the disc for reading as
+well, and never takes part in "MismatchedTags": a stem that disagrees with the
+tags shows up as "MismatchedPath" and is fixed by "MoveFile", like every other
+tag based part of a path.

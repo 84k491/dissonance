@@ -1,6 +1,6 @@
 // The only place that knows which remote tag source is used, and only in urls.
 
-use crate::remote_tags::{RemoteAlbum, RemoteArtist, RemoteInfoProvider};
+use crate::remote_tags::{RemoteAlbum, RemoteArtist, RemoteInfoProvider, RemoteTrack};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -11,6 +11,9 @@ static SEARCH_LIMIT: &str = "25";
 
 // The listing of one artist's albums, capped at what the source allows.
 static ALBUM_LIMIT: &str = "200";
+
+// The listing of one album's tracks. A record longer than this does not exist.
+static TRACK_LIMIT: &str = "200";
 static REQUEST_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +32,14 @@ struct RemoteResult {
     collection_name: Option<String>,
     track_count: Option<u32>,
     release_date: Option<String>,
+
+    // a track is a song; the album listing leads with the album itself, which
+    // carries none of these
+    track_id: Option<i64>,
+    track_name: Option<String>,
+    track_number: Option<u32>,
+    disc_number: Option<u32>,
+    disc_count: Option<u32>,
 }
 
 impl RemoteResult {
@@ -50,6 +61,20 @@ impl RemoteResult {
 
             // zero means the source told no count
             track_count: self.track_count.unwrap_or_default(),
+        })
+    }
+
+    // 'None' for anything that is not a song: the track listing of an album
+    // leads with the album record itself, which has no track id.
+    fn into_track(self) -> Option<RemoteTrack> {
+        Some(RemoteTrack {
+            id: self.track_id?.to_string(),
+            name: self.track_name?,
+            track_number: self.track_number?,
+
+            // zero means the source told nothing about the set
+            disc_number: self.disc_number.unwrap_or_default(),
+            total_discs: self.disc_count.unwrap_or_default(),
         })
     }
 
@@ -116,6 +141,14 @@ impl HttpRemoteInfoProvider {
             .filter_map(RemoteResult::into_album)
             .collect())
     }
+
+    fn request_tracks(&self, url: &str, query: &[(&str, &str)]) -> Result<Vec<RemoteTrack>, String> {
+        Ok(self
+            .request(url, query)?
+            .into_iter()
+            .filter_map(RemoteResult::into_track)
+            .collect())
+    }
 }
 
 impl RemoteInfoProvider for HttpRemoteInfoProvider {
@@ -154,6 +187,14 @@ impl RemoteInfoProvider for HttpRemoteInfoProvider {
             .into_iter()
             .next()
             .ok_or(format!("No remote album with id {}", id))
+    }
+
+    // The tracks of one album, asked for by the album's own id.
+    fn album_tracks(&self, album_id: &str) -> Result<Vec<RemoteTrack>, String> {
+        self.request_tracks(
+            LOOKUP_URL,
+            &[("id", album_id), ("entity", "song"), ("limit", TRACK_LIMIT)],
+        )
     }
 }
 
@@ -210,5 +251,21 @@ mod tests {
 
         assert_eq!(by_id.id, first.id);
         assert_eq!(by_id.name, first.name);
+    }
+
+    // Goes over the net as well:
+    //   cargo test -- --ignored
+    #[test]
+    #[ignore]
+    fn the_remote_source_answers_a_track_listing() {
+        let provider = HttpRemoteInfoProvider::new();
+
+        // Abbey Road, whose own record leads the listing and must not turn up
+        // among the tracks
+        let tracks = provider.album_tracks("1441164426").expect("listing failed");
+
+        assert!(!tracks.is_empty());
+        assert!(tracks.iter().all(|track| track.track_number > 0));
+        assert!(tracks.iter().any(|track| track.name == "Come Together"));
     }
 }

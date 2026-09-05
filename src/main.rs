@@ -23,9 +23,10 @@ use crate::{
     itunes::HttpRemoteInfoProvider,
     music_file::FsEntryTrait,
     remote_tags::{
-        RemoteAlbumMeta, RemoteArtistMeta, resolve_album_mapping, resolve_artist_mapping,
-        resolve_remote_album_tags, resolve_remote_name,
+        RemoteAlbumMeta, RemoteArtistMeta, resolve_album_mapping, resolve_album_track_mapping,
+        resolve_artist_mapping, resolve_remote_album_tags, resolve_remote_name,
     },
+    track_selector::ModalTrackSelector,
 };
 
 mod album_selector;
@@ -36,6 +37,7 @@ mod itunes;
 mod music_file;
 mod remote_tags;
 mod tags;
+mod track_selector;
 
 slint::include_modules!();
 
@@ -446,8 +448,13 @@ fn start_remote_album_tags_install(
     backend: Backend,
     selected: Selected,
 ) {
-    let meta = { backend.lock().unwrap().remote_album_meta(&path) };
-    let Some(meta) = meta else {
+    // everything the install needs is read under the lock, once
+    let request = {
+        let b = backend.lock().unwrap();
+        b.remote_album_meta(&path)
+            .map(|meta| (meta, b.local_album_tracks(&path)))
+    };
+    let Some((meta, locals)) = request else {
         return;
     };
 
@@ -462,8 +469,27 @@ fn start_remote_album_tags_install(
             Ok(tags) => tags,
         };
 
+        let album_id = match &meta {
+            RemoteAlbumMeta::Mapped { id, .. } => id.clone(),
+            RemoteAlbumMeta::NoSuitable => return,
+        };
+
+        let selector = ModalTrackSelector {
+            album_name: remote.name.clone(),
+        };
+
+        let tracks = match resolve_album_track_mapping(&album_id, &locals, &provider, &selector) {
+            Err(e) => {
+                println!("Failed to match the tracks of the album: {}", e);
+                return;
+            }
+            // cancelled, not one file is touched
+            Ok(None) => return,
+            Ok(Some(tracks)) => tracks.into_iter().collect::<BTreeMap<_, _>>(),
+        };
+
         apply_on_ui_thread(weak, backend, selected, move |b| {
-            b.install_remote_album_tags(&path, &remote)
+            b.install_remote_album_tags(&path, &remote, &tracks)
         });
     });
 }

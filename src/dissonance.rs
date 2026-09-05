@@ -5,8 +5,8 @@ use crate::{
     directory::{Directory, FsEntry},
     music_file::{FsEntryTrait, InvalidFile, MusicFile},
     remote_tags::{
-        RemoteAlbumMappingDatabase, RemoteAlbumMeta, RemoteAlbumTags, RemoteArtistMappingDatabase,
-        RemoteArtistMeta,
+        LocalTrack, RemoteAlbumMappingDatabase, RemoteAlbumMeta, RemoteAlbumTags,
+        RemoteArtistMappingDatabase, RemoteArtistMeta, RemoteTrackTags,
     },
 };
 use std::{
@@ -549,11 +549,42 @@ impl Dissonance {
         }
     }
 
-    // Writes the remote album name and year into every music file below,
-    // leaving the artist, the title and the track number alone. The files are
-    // not moved, so a 'MismatchedPath' may appear and is fixed by 'MoveFile':
-    // both halves of an album directory name are tag based.
-    pub fn install_remote_album_tags(&mut self, rel_path: &Path, remote: &RemoteAlbumTags) {
+    // The music files of an album, named the way the matching wants them: the
+    // file name free of its numbers, because the tags are exactly what is not
+    // trusted here.
+    // CLAUDE! can it be an Directory's method? also, in return, can it be not a new struct, but a "MusicFile" ref?
+    pub fn local_album_tracks(&self, rel_path: &Path) -> Vec<LocalTrack> {
+        let files = match self.root_dir.find_recursive(rel_path) {
+            Some(FsEntry::FsDirectory(d)) => d.children_music_files_recursive(),
+            _ => return Vec::new(),
+        };
+
+        files
+            .into_iter()
+            .map(|path| {
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+
+                LocalTrack {
+                    name: MusicFile::parse_file_stem(&stem).title,
+                    path,
+                }
+            })
+            .collect()
+    }
+
+    // Writes the remote album name, year and artist into every music file
+    // below, and the title and the numbers of every file that was matched onto
+    // a remote track. A file absent from 'tracks' was skipped: it keeps its own
+    // title and numbers and takes the album tags all the same.
+    //
+    // The files are not moved, so a 'MismatchedPath' may appear and is fixed by
+    // 'MoveFile': every part of a path below the root is tag based.
+    pub fn install_remote_album_tags(
+        &mut self,
+        rel_path: &Path,
+        remote: &RemoteAlbumTags,
+        tracks: &BTreeMap<PathBuf, RemoteTrackTags>,
+    ) {
         let files = match self.root_dir.find_recursive(rel_path) {
             Some(FsEntry::FsDirectory(d)) => d.children_music_files_recursive(),
             _ => return,
@@ -565,7 +596,7 @@ impl Dissonance {
                 _ => continue,
             };
 
-            self.write_album_tags(&file, remote);
+            self.write_album_tags(&file, remote, tracks.get(&file));
 
             // read the file again, so that its problems and the meta of every
             // directory above it are recalculated. Only the node of the tree is
@@ -588,9 +619,15 @@ impl Dissonance {
         }
     }
 
-    // Replaces the album and the year of one music file, keeping every other
-    // tag of it.
-    fn write_album_tags(&self, rel_path: &Path, remote: &RemoteAlbumTags) {
+    // Replaces the album, the year and the artist of one music file, and its
+    // title and numbers when it was matched onto a remote track. Every other
+    // tag of it is kept.
+    fn write_album_tags(
+        &self,
+        rel_path: &Path,
+        remote: &RemoteAlbumTags,
+        track: Option<&RemoteTrackTags>,
+    ) {
         let mf = match self.root_dir.find_recursive(rel_path) {
             Some(FsEntry::FsMusicFile(mf)) => mf,
             _ => return,
@@ -603,6 +640,17 @@ impl Dissonance {
         // would only turn into a 'MissingYear' problem
         if !remote.year.is_empty() {
             tags.year = remote.year.clone();
+        }
+
+        if !remote.artist_name.is_empty() {
+            tags.artist = remote.artist_name.clone();
+        }
+
+        if let Some(track) = track {
+            tags.title = track.title.clone();
+            tags.track_number = track.track_number.clone();
+            tags.disc_number = track.disc_number.clone();
+            tags.total_discs = track.total_discs.clone();
         }
 
         mf.set_tags(&tags);
@@ -994,6 +1042,13 @@ impl Dissonance {
             return;
         }
 
+        // the old node is forgotten first: adding recalculates the meta of
+        // every directory on the way, which reads the tags of every file below
+        // them, and the file at the old path is gone from the disk by now. A
+        // rename within one directory would read it and panic
+        if !self.root_dir.remove_entry_recursive(&from) {
+            println!("Failed to forget file: {}", from.to_string_lossy());
+        }
         self.root_dir.add_entry_recursive(
             &to,
             SyncedEntry {
@@ -1001,9 +1056,6 @@ impl Dissonance {
                 synced: false,
             },
         );
-        if !self.root_dir.remove_entry_recursive(&from) {
-            println!("Failed to forget file: {}", from.to_string_lossy());
-        }
 
         let _ = remove_empty_subdirs::remove_empty_subdirs(&self.source.clone().unwrap());
     }
@@ -1176,17 +1228,17 @@ mod tests {
         music_file::{FsEntryTrait, MusicFile},
         remote_tags::{
             RemoteAlbumMappingDatabase, RemoteAlbumMeta, RemoteAlbumTags,
-            RemoteArtistMappingDatabase, RemoteArtistMeta,
+            RemoteArtistMappingDatabase, RemoteArtistMeta, RemoteTrackTags,
             mocks::{
                 MockAlbumChoice, MockAlbumSelector, MockArtistSelector, MockChoice,
-                MockRemoteInfoProvider,
+                MockRemoteInfoProvider, MockTrackChoice, MockTrackSelector,
             },
-            resolve_album_mapping, resolve_artist_mapping, resolve_remote_album_tags,
-            resolve_remote_name,
+            resolve_album_mapping, resolve_album_track_mapping, resolve_artist_mapping,
+            resolve_remote_album_tags, resolve_remote_name,
         },
     };
     use std::{
-        collections::BTreeSet,
+        collections::{BTreeMap, BTreeSet},
         fs,
         path::{Path, PathBuf},
         sync::Once,
@@ -1371,6 +1423,16 @@ mod tests {
         ])
     }
 
+    // The same source, told what the tracks of "Revolver (2022 Mix)" are. The
+    // numbers disagree with the local ones on purpose: they are what an
+    // install is after.
+    fn remote_track_universe() -> MockRemoteInfoProvider {
+        remote_album_universe().with_tracks(&[
+            ("1642995371", "t1", "Eleanor Rigby", 0, 4),
+            ("1642995371", "t2", "Taxman", 0, 7),
+        ])
+    }
+
     fn write_tags(base: &Path, rel: &str, artist: &str, title: &str, track_number: &str) {
         let file = MusicFile::from(
             &base.to_path_buf(),
@@ -1387,6 +1449,14 @@ mod tests {
         tags.track_number = track_number.to_string();
 
         file.set_tags(&tags);
+    }
+
+    // Every tag of one file of the tree, read from disk again.
+    fn tags_of(backend: &Dissonance, rel: &str) -> crate::tags::tags::Tags {
+        match backend.root_dir.find_recursive(Path::new(rel)) {
+            Some(FsEntry::FsMusicFile(mf)) => mf.tags(),
+            _ => panic!("expected a music file at {}", rel),
+        }
     }
 
     fn artist_tag_of(base: &Path, rel: &str) -> String {
@@ -1911,7 +1981,7 @@ mod tests {
         let remote =
             resolve_remote_album_tags(&stored, &remote_album_universe()).expect("no remote tags");
 
-        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote);
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &BTreeMap::new());
 
         assert_eq!(
             album_tag_of(dirs.source(), FIRST_SONG),
@@ -1926,8 +1996,12 @@ mod tests {
         assert_eq!(year_tag_of(dirs.source(), FIRST_SONG), "2022");
         assert_eq!(year_tag_of(dirs.source(), SECOND_SONG), "2022");
 
-        // the artist, the title and the track number are left alone
-        assert_eq!(artist_tag_of(dirs.source(), FIRST_SONG), "Beatles");
+        // the remote artist went in as well, so that one click on an album is
+        // enough even when the artist tags were never installed
+        assert_eq!(artist_tag_of(dirs.source(), FIRST_SONG), "The Beatles");
+
+        // no file was matched onto a track, so the titles and the numbers of
+        // every one of them are left alone
         let first = match backend.root_dir.find_recursive(Path::new(FIRST_SONG)) {
             Some(FsEntry::FsMusicFile(mf)) => mf.tags(),
             _ => panic!("expected a music file"),
@@ -1957,8 +2031,10 @@ mod tests {
             Path::new(ALBUM_DIR),
             &RemoteAlbumTags {
                 name: "Revolver (2022 Mix)".to_string(),
+                artist_name: "The Beatles".to_string(),
                 year: String::new(),
             },
+            &BTreeMap::new(),
         );
 
         assert_eq!(
@@ -1984,8 +2060,10 @@ mod tests {
             Path::new(ALBUM_DIR),
             &RemoteAlbumTags {
                 name: "Revolver (2022 Mix)".to_string(),
+                artist_name: "The Beatles".to_string(),
                 year: "2022".to_string(),
             },
+            &BTreeMap::new(),
         );
 
         // the files were not moved, so the path no longer matches the tags
@@ -1997,12 +2075,13 @@ mod tests {
 
         backend.move_entry_to_tag_based_path(PathBuf::from(ALBUM_DIR));
 
-        // the installed year is part of the directory name as well
-        let moved = "Beatles/[2022] Revolver (2022 Mix)/[01] Taxman.mp3";
+        // the installed year is part of the directory name as well, and the
+        // installed artist is the directory above it
+        let moved = "The Beatles/[2022] Revolver (2022 Mix)/[01] Taxman.mp3";
         assert!(dirs.source().join(moved).exists());
         assert!(!dirs.source().join(FIRST_SONG).exists());
 
-        let album = dir_at(&backend, "Beatles/[2022] Revolver (2022 Mix)");
+        let album = dir_at(&backend, "The Beatles/[2022] Revolver (2022 Mix)");
         assert!(!album.find_problems().contains(&Problem::MismatchedPath));
     }
 
@@ -2035,5 +2114,416 @@ mod tests {
             resolve_remote_album_tags(&stored, &remote_album_universe()).expect("no remote tags");
         assert_eq!(remote.name, "Revolver (2022 Mix)");
         assert_eq!(remote.year, "2022");
+    }
+
+    // The mapping an install of 'ALBUM_DIR' would be given, resolved with the
+    // mocks in place of the net and the user.
+    fn track_mapping(
+        backend: &Dissonance,
+        provider: &MockRemoteInfoProvider,
+        choice: MockTrackChoice,
+    ) -> Option<BTreeMap<PathBuf, RemoteTrackTags>> {
+        let meta = backend
+            .remote_album_meta(Path::new(ALBUM_DIR))
+            .expect("no mapping");
+        let id = match meta {
+            RemoteAlbumMeta::Mapped { id, .. } => id,
+            RemoteAlbumMeta::NoSuitable => panic!("the album is not mapped"),
+        };
+
+        let mapping = resolve_album_track_mapping(
+            &id,
+            &backend.local_album_tracks(Path::new(ALBUM_DIR)),
+            provider,
+            &MockTrackSelector::new(choice),
+        )
+        .expect("the matching failed")?;
+
+        Some(mapping.into_iter().collect())
+    }
+
+    #[test]
+    fn the_local_tracks_of_an_album_are_named_after_the_files() {
+        let (_dirs, backend) = backend_with_an_artist();
+
+        let locals = backend.local_album_tracks(Path::new(ALBUM_DIR));
+
+        // the numbers of the file names are left out: only the name is matched
+        assert_eq!(
+            locals.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+            vec!["Taxman".to_string(), "Eleanor Rigby".to_string()]
+        );
+        assert_eq!(locals[0].path, PathBuf::from(FIRST_SONG));
+    }
+
+    #[test]
+    fn installing_remote_album_tags_writes_the_matched_track_numbers() {
+        let (dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        let provider = remote_track_universe();
+        let stored = backend
+            .remote_album_meta(Path::new(ALBUM_DIR))
+            .expect("no mapping");
+        let remote = resolve_remote_album_tags(&stored, &provider).expect("no remote tags");
+
+        // the names agree exactly, so no user was ever needed
+        let tracks = track_mapping(&backend, &provider, MockTrackChoice::Cancel)
+            .expect("the matching was cancelled");
+
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks);
+
+        let first = tags_of(&backend, FIRST_SONG);
+        assert_eq!(first.title, "Taxman");
+        assert_eq!(first.track_number, "7");
+        assert_eq!(first.artist, "The Beatles");
+        assert_eq!(first.album, "Revolver (2022 Mix)");
+
+        let second = tags_of(&backend, SECOND_SONG);
+        assert_eq!(second.title, "Eleanor Rigby");
+        assert_eq!(second.track_number, "4");
+
+        // a single disc leaves the set alone, so the file names keep their
+        // plain form once the files are moved
+        assert_eq!(first.disc_number, "");
+        assert_eq!(first.total_discs, "");
+
+        backend.move_entry_to_tag_based_path(PathBuf::from(ARTIST_DIR));
+        assert!(
+            dirs.source()
+                .join("The Beatles/[2022] Revolver (2022 Mix)/[07] Taxman.mp3")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn a_skipped_file_still_takes_the_album_tags() {
+        let (_dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        // a source that knows nothing of either local file
+        let provider = remote_album_universe().with_tracks(&[(
+            "1642995371",
+            "t1",
+            "Something Else Entirely",
+            0,
+            9,
+        )]);
+        let stored = backend
+            .remote_album_meta(Path::new(ALBUM_DIR))
+            .expect("no mapping");
+        let remote = resolve_remote_album_tags(&stored, &provider).expect("no remote tags");
+
+        let tracks = track_mapping(&backend, &provider, MockTrackChoice::Skip)
+            .expect("the matching was cancelled");
+        assert!(tracks.is_empty());
+
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks);
+
+        let first = tags_of(&backend, FIRST_SONG);
+
+        // the album tags landed all the same
+        assert_eq!(first.album, "Revolver (2022 Mix)");
+        assert_eq!(first.year, "2022");
+        assert_eq!(first.artist, "The Beatles");
+
+        // and the file kept its own title and number
+        assert_eq!(first.title, "Taxman");
+        assert_eq!(first.track_number, "1");
+    }
+
+    #[test]
+    fn a_set_of_several_discs_reaches_the_file_names() {
+        let (dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        // one track of each of two discs, both numbered one
+        let provider = remote_album_universe().with_tracks(&[
+            ("1642995371", "t1", "Taxman", 1, 1),
+            ("1642995371", "t2", "Eleanor Rigby", 2, 1),
+        ]);
+        let stored = backend
+            .remote_album_meta(Path::new(ALBUM_DIR))
+            .expect("no mapping");
+        let remote = resolve_remote_album_tags(&stored, &provider).expect("no remote tags");
+
+        let tracks = track_mapping(&backend, &provider, MockTrackChoice::Cancel)
+            .expect("the matching was cancelled");
+
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks);
+
+        let first = tags_of(&backend, FIRST_SONG);
+        assert_eq!(first.track_number, "1");
+        assert_eq!(first.disc_number, "1");
+        assert_eq!(first.total_discs, "2");
+
+        // both are track one, so only the disc keeps the two files apart
+        backend.move_entry_to_tag_based_path(PathBuf::from(ARTIST_DIR));
+
+        let album = dirs.source().join("The Beatles/[2022] Revolver (2022 Mix)");
+        assert!(album.join("[1-01] Taxman.mp3").exists());
+        assert!(album.join("[2-01] Eleanor Rigby.mp3").exists());
+    }
+
+    #[test]
+    fn an_installed_track_number_leaves_a_path_problem_that_move_file_fixes() {
+        let (_dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        let provider = remote_track_universe();
+        let stored = backend
+            .remote_album_meta(Path::new(ALBUM_DIR))
+            .expect("no mapping");
+        let remote = resolve_remote_album_tags(&stored, &provider).expect("no remote tags");
+        let tracks = track_mapping(&backend, &provider, MockTrackChoice::Cancel)
+            .expect("the matching was cancelled");
+
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks);
+
+        // the files were not moved, so the numbers of their names are stale
+        assert!(
+            dir_at(&backend, ALBUM_DIR)
+                .find_problems()
+                .contains(&Problem::MismatchedPath)
+        );
+
+        backend.move_entry_to_tag_based_path(PathBuf::from(ARTIST_DIR));
+
+        let album = dir_at(&backend, "The Beatles/[2022] Revolver (2022 Mix)");
+        assert!(!album.find_problems().contains(&Problem::MismatchedPath));
+    }
+
+    // A file renamed inside its own directory: the tree held a node for the old
+    // name while the new one was being added, and recalculating the album meta
+    // read the tags of a file that was no longer there.
+    #[test]
+    fn a_file_renamed_within_its_directory_is_moved_without_a_panic() {
+        redirect_config_dir();
+
+        let unnumbered = "Slipknot/[2019] We Are Not Your Kind/Unsainted.mp3";
+        let dirs = TestDirs::new(
+            &[TestEntry {
+                path: unnumbered,
+                kind: TestEntryKind::MusicFile,
+            }],
+            &[],
+        );
+
+        // the tags say track one, so the file belongs under a numbered name in
+        // the very same directory
+        let file = MusicFile::from(
+            &dirs.source().to_path_buf(),
+            &PathBuf::from(unnumbered),
+            SyncIntention::Unspecified,
+        )
+        .expect("not a music file");
+
+        let mut tags = MusicFile::empty_tags();
+        tags.artist = "Slipknot".to_string();
+        tags.album = "We Are Not Your Kind".to_string();
+        tags.year = "2019".to_string();
+        tags.title = "Unsainted".to_string();
+        tags.track_number = "1".to_string();
+        file.set_tags(&tags);
+
+        let saved_state = AppSavedState {
+            source: Some(dirs.source().to_path_buf()),
+            destination: Some(dirs.destination().to_path_buf()),
+        };
+        let mut backend = Dissonance::new(saved_state);
+        let source_files = crate::directory::load_dir_hash_set_files_only(
+            dirs.source().to_path_buf(),
+            PathBuf::new(),
+        );
+        backend.handle_root_loaded(source_files);
+
+        let moved = backend
+            .move_entry_to_tag_based_path(PathBuf::from(unnumbered))
+            .expect("nothing was moved");
+
+        let numbered = "Slipknot/[2019] We Are Not Your Kind/[01] Unsainted.mp3";
+        assert_eq!(moved, PathBuf::from(numbered));
+        assert!(dirs.source().join(numbered).is_file());
+        assert!(!dirs.source().join(unnumbered).exists());
+
+        // the tree followed the file, and the old name is gone from it
+        assert!(
+            backend
+                .root_dir
+                .find_recursive(Path::new(unnumbered))
+                .is_none()
+        );
+        assert!(
+            backend
+                .root_dir
+                .find_recursive(Path::new(numbered))
+                .is_some()
+        );
+
+        let album = dir_at(&backend, "Slipknot/[2019] We Are Not Your Kind");
+        assert!(!album.find_problems().contains(&Problem::MismatchedPath));
+    }
+
+    // Builds a one-file source whose tags agree with its path, and answers the
+    // problems the file is left with.
+    fn problems_of_a_matching_file(artist: &str, album: &str, year: &str, title: &str) -> BTreeSet<Problem> {
+        redirect_config_dir();
+
+        let rel = format!("{}/[{}] {}/[01] {}.mp3", artist, year, album, title);
+        let dirs = TestDirs::new(
+            &[TestEntry {
+                path: &rel,
+                kind: TestEntryKind::MusicFile,
+            }],
+            &[],
+        );
+
+        let file = MusicFile::from(
+            &dirs.source().to_path_buf(),
+            &PathBuf::from(&rel),
+            SyncIntention::Unspecified,
+        )
+        .expect("not a music file");
+
+        let mut tags = MusicFile::empty_tags();
+        tags.artist = artist.to_string();
+        tags.album = album.to_string();
+        tags.year = year.to_string();
+        tags.title = title.to_string();
+        tags.track_number = "1".to_string();
+        file.set_tags(&tags);
+
+        // read again, so that the problems are those of the written file
+        MusicFile::from(
+            &dirs.source().to_path_buf(),
+            &PathBuf::from(&rel),
+            SyncIntention::Unspecified,
+        )
+        .expect("not a music file")
+        .find_problems()
+    }
+
+    // A directory has no extension, so a dot in an album name used to cut it
+    // down to its head and no tag could ever agree with the path again.
+    #[test]
+    fn a_dot_in_an_album_name_is_no_mismatch() {
+        let problems = problems_of_a_matching_file(
+            "Slipknot",
+            "Vol. 3 The Subliminal Verses",
+            "2004",
+            "Duality",
+        );
+
+        assert!(
+            !problems.contains(&Problem::MismatchedTags),
+            "unexpected problems: {:?}",
+            problems
+        );
+        assert!(
+            !problems.contains(&Problem::MismatchedPath),
+            "unexpected problems: {:?}",
+            problems
+        );
+    }
+
+    #[test]
+    fn a_plain_album_name_is_no_mismatch_either() {
+        let problems = problems_of_a_matching_file("Beatles", "Revolver", "1966", "Taxman");
+
+        assert!(
+            !problems.contains(&Problem::MismatchedTags),
+            "unexpected problems: {:?}",
+            problems
+        );
+        assert!(
+            !problems.contains(&Problem::MismatchedPath),
+            "unexpected problems: {:?}",
+            problems
+        );
+    }
+
+    // An invalid character in an album name used to survive in the tag while
+    // 'FixCharacters' took it out of the directory, so the two could never
+    // agree and 'MoveFile' put it straight back into the path.
+    #[test]
+    fn an_invalid_character_in_an_album_name_is_no_lasting_mismatch() {
+        redirect_config_dir();
+
+        // the directory is what 'FixCharacters' leaves behind
+        let rel = "Slipknot/[2004] Vol. 3_ The Subliminal Verses/[01] Duality.mp3";
+        let dirs = TestDirs::new(
+            &[TestEntry {
+                path: rel,
+                kind: TestEntryKind::MusicFile,
+            }],
+            &[],
+        );
+
+        let file = MusicFile::from(
+            &dirs.source().to_path_buf(),
+            &PathBuf::from(rel),
+            SyncIntention::Unspecified,
+        )
+        .expect("not a music file");
+
+        let mut tags = MusicFile::empty_tags();
+        tags.artist = "Slipknot".to_string();
+        tags.album = "Vol. 3: The Subliminal Verses".to_string();
+        tags.year = "2004".to_string();
+        tags.title = "Duality".to_string();
+        tags.track_number = "1".to_string();
+        file.set_tags(&tags);
+
+        let file = MusicFile::from(
+            &dirs.source().to_path_buf(),
+            &PathBuf::from(rel),
+            SyncIntention::Unspecified,
+        )
+        .expect("not a music file");
+
+        // the colon is gone from the tag as it is read, so the path the tags
+        // ask for holds no invalid character of its own
+        assert_eq!(file.tags().album, "Vol. 3 The Subliminal Verses");
+        assert_eq!(
+            file.compose_path_from_tags(&file.tags()),
+            PathBuf::from("Slipknot/[2004] Vol. 3 The Subliminal Verses/[01] Duality.mp3")
+        );
+
+        // and 'MoveFile' settles it for good
+        let saved_state = AppSavedState {
+            source: Some(dirs.source().to_path_buf()),
+            destination: Some(dirs.destination().to_path_buf()),
+        };
+        let mut backend = Dissonance::new(saved_state);
+        let source_files = crate::directory::load_dir_hash_set_files_only(
+            dirs.source().to_path_buf(),
+            PathBuf::new(),
+        );
+        backend.handle_root_loaded(source_files);
+
+        let moved = backend
+            .move_entry_to_tag_based_path(PathBuf::from(rel))
+            .expect("nothing was moved");
+
+        let settled = match backend.root_dir.find_recursive(&moved) {
+            Some(FsEntry::FsMusicFile(mf)) => mf.find_problems(),
+            _ => panic!("expected a music file"),
+        };
+
+        assert!(
+            !settled.contains(&Problem::MismatchedTags),
+            "unexpected problems: {:?}",
+            settled
+        );
+        assert!(
+            !settled.contains(&Problem::MismatchedPath),
+            "unexpected problems: {:?}",
+            settled
+        );
+        assert!(
+            !settled.contains(&Problem::InvalidCharacters),
+            "unexpected problems: {:?}",
+            settled
+        );
     }
 }

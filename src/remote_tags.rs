@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteArtist {
@@ -23,6 +24,27 @@ pub struct RemoteAlbum {
 
     // Zero means the remote source did not tell the count.
     pub track_count: u32,
+}
+
+// One track of a remote album.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTrack {
+    pub id: String,
+    pub name: String,
+    pub track_number: u32,
+
+    // Zero means the source told nothing about the set.
+    pub disc_number: u32,
+    pub total_discs: u32,
+}
+
+// One local file taking part in the matching. The name is what the file is
+// called on disk, free of the track number, because the tags are exactly what
+// is not trusted here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalTrack {
+    pub path: PathBuf,
+    pub name: String,
 }
 
 // Mapping state of a single local artist. An absent mapping is 'Option::None',
@@ -52,6 +74,10 @@ pub enum RemoteAlbumMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteAlbumTags {
     pub name: String,
+
+    // The album install writes the artist as well, so that one click on an
+    // album is enough even when the artist tags were never installed.
+    pub artist_name: String,
 
     // Empty when the remote source told no year; the local one is then left
     // alone rather than emptied.
@@ -93,6 +119,55 @@ pub enum AlbumSelection {
     Cancelled,
 }
 
+// One option of the track list, ranked against the name of one local file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackCandidate {
+    pub track: RemoteTrack,
+    pub likeness_percent: u32,
+}
+
+// What the user picked for one local file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrackSelection {
+    Chosen(RemoteTrack),
+
+    // This file is left as it is; the rest of the album goes on.
+    Skip,
+
+    // The whole install is dropped, the files already matched included.
+    Cancelled,
+}
+
+// What a track install writes into one music file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteTrackTags {
+    pub title: String,
+    pub track_number: String,
+
+    // Empty when the source told nothing about the set.
+    pub disc_number: String,
+    pub total_discs: String,
+}
+
+impl RemoteTrackTags {
+    fn of(track: &RemoteTrack) -> RemoteTrackTags {
+        let number_or_empty = |n: u32| match n {
+            0 => String::new(),
+            n => n.to_string(),
+        };
+
+        RemoteTrackTags {
+            title: track.name.clone(),
+            track_number: track.track_number.to_string(),
+            disc_number: number_or_empty(track.disc_number),
+            total_discs: number_or_empty(track.total_discs),
+        }
+    }
+}
+
+// How alike two names have to be to be matched without asking the user.
+pub const AUTO_MATCH_LIKENESS: u32 = 99;
+
 pub trait RemoteInfoProvider: Send + Sync {
     // (localArtist) -> artistList
     fn search_artists(&self, local_name: &str) -> Result<Vec<RemoteArtist>, String>;
@@ -106,6 +181,9 @@ pub trait RemoteInfoProvider: Send + Sync {
 
     // (id) -> album. Needed because the storage keeps the id alone.
     fn album_by_id(&self, id: &str) -> Result<RemoteAlbum, String>;
+
+    // (albumId) -> trackList. Asked once per install, never per file.
+    fn album_tracks(&self, album_id: &str) -> Result<Vec<RemoteTrack>, String>;
 }
 
 pub trait ArtistSelector {
@@ -116,6 +194,11 @@ pub trait ArtistSelector {
 pub trait AlbumSelector {
     // (albumList) -> finalAlbum
     fn select(&self, local_name: &str, candidates: &[AlbumCandidate]) -> AlbumSelection;
+}
+
+pub trait TrackSelector {
+    // (localFile, trackList) -> finalTrack
+    fn select(&self, local: &LocalTrack, candidates: &[TrackCandidate]) -> TrackSelection;
 }
 
 // The whole request flow, free of locks and threads: the caller decides on
@@ -196,8 +279,131 @@ pub fn resolve_remote_album_tags(
 
     Ok(RemoteAlbumTags {
         name: album.name,
+        artist_name: album.artist_name,
         year: album.year,
     })
+}
+
+// Maps every local file of one album onto a track of the remote album.
+//
+// The remote list is asked for once and kept as a pool: a track that is taken
+// leaves it, so two local files can never end up on one remote track.
+//
+// The pool is emptied in two passes. The first one matches whatever is alike
+// enough to need no user at all, best pair first, so that an early file cannot
+// take a track that fits a later one better. Only what is left over is put to
+// the user, one file at a time, against what is left of the pool.
+//
+// 'Ok(None)' means the user cancelled: nothing at all is to be installed.
+// A skipped file is simply absent from the result.
+pub fn resolve_album_track_mapping(
+    album_id: &str,
+    locals: &[LocalTrack],
+    provider: &dyn RemoteInfoProvider,
+    selector: &dyn TrackSelector,
+) -> Result<Option<Vec<(PathBuf, RemoteTrackTags)>>, String> {
+    let mut pool = provider.album_tracks(album_id)?;
+    let mut matched: Vec<Option<RemoteTrack>> = vec![None; locals.len()];
+
+    auto_match(locals, &mut pool, &mut matched);
+
+    for (index, local) in locals.iter().enumerate() {
+        if matched[index].is_some() {
+            continue;
+        }
+
+        let candidates = rank_track_candidates(&local.name, &pool);
+
+        match selector.select(local, &candidates) {
+            TrackSelection::Chosen(track) => {
+                take_from_pool(&mut pool, &track.id);
+                matched[index] = Some(track);
+            }
+            TrackSelection::Skip => {}
+            TrackSelection::Cancelled => return Ok(None),
+        }
+    }
+
+    let ret = locals
+        .iter()
+        .zip(matched)
+        .filter_map(|(local, track)| {
+            Some((local.path.clone(), RemoteTrackTags::of(&track?)))
+        })
+        .collect();
+
+    Ok(Some(ret))
+}
+
+// Pairs up everything alike enough to need no user, the closest pair first.
+// The matched tracks leave the pool.
+fn auto_match(
+    locals: &[LocalTrack],
+    pool: &mut Vec<RemoteTrack>,
+    matched: &mut [Option<RemoteTrack>],
+) {
+    // every pair worth taking, as (likeness, local index, pool index)
+    let mut pairs: Vec<(u32, usize, usize)> = Vec::new();
+
+    for (local_index, local) in locals.iter().enumerate() {
+        for (pool_index, track) in pool.iter().enumerate() {
+            let likeness = likeness_percent(&local.name, &track.name);
+
+            if likeness >= AUTO_MATCH_LIKENESS {
+                pairs.push((likeness, local_index, pool_index));
+            }
+        }
+    }
+
+    // the closest first; the indices only keep the order of equals steady
+    pairs.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+
+    let mut taken_tracks = vec![false; pool.len()];
+
+    for (_, local_index, pool_index) in pairs {
+        if matched[local_index].is_some() || taken_tracks[pool_index] {
+            continue;
+        }
+
+        matched[local_index] = Some(pool[pool_index].clone());
+        taken_tracks[pool_index] = true;
+    }
+
+    let mut index = 0;
+    pool.retain(|_| {
+        let keep = !taken_tracks[index];
+        index += 1;
+        keep
+    });
+}
+
+// Drops the first track of that id, so that a pool seeded with duplicates
+// still gives every local file one track of its own.
+fn take_from_pool(pool: &mut Vec<RemoteTrack>, id: &str) {
+    if let Some(index) = pool.iter().position(|track| track.id == id) {
+        pool.remove(index);
+    }
+}
+
+// Sorts the remaining tracks by likeness to one local file name, the closest
+// first. Equals keep the order of the album.
+pub fn rank_track_candidates(local_name: &str, pool: &[RemoteTrack]) -> Vec<TrackCandidate> {
+    let mut ret: Vec<TrackCandidate> = pool
+        .iter()
+        .map(|track| TrackCandidate {
+            likeness_percent: likeness_percent(local_name, &track.name),
+            track: track.clone(),
+        })
+        .collect();
+
+    ret.sort_by(|a, b| {
+        b.likeness_percent
+            .cmp(&a.likeness_percent)
+            .then(a.track.disc_number.cmp(&b.track.disc_number))
+            .then(a.track.track_number.cmp(&b.track.track_number))
+    });
+
+    ret
 }
 
 // Sorts the found artists by likeness to the local name, the closest first.
@@ -463,9 +669,11 @@ impl RemoteAlbumMappingDatabase {
 
 #[cfg(test)]
 pub mod mocks {
+    use std::cell::RefCell;
+
     use super::{
-        AlbumCandidate, AlbumSelection, ArtistCandidate, RemoteAlbum, RemoteArtist,
-        RemoteInfoProvider, Selection,
+        AlbumCandidate, AlbumSelection, ArtistCandidate, LocalTrack, RemoteAlbum, RemoteArtist,
+        RemoteInfoProvider, RemoteTrack, Selection, TrackCandidate, TrackSelection,
     };
 
     // A provider seeded with every artist and album it knows about. A real call
@@ -475,6 +683,9 @@ pub mod mocks {
 
         // the artist id an album belongs to, beside the album itself
         albums: Vec<(String, RemoteAlbum)>,
+
+        // the album id a track belongs to, beside the track itself
+        tracks: Vec<(String, RemoteTrack)>,
 
         failure: Option<String>,
     }
@@ -490,6 +701,7 @@ pub mod mocks {
                     })
                     .collect(),
                 albums: Vec::new(),
+                tracks: Vec::new(),
                 failure: None,
             }
         }
@@ -523,11 +735,53 @@ pub mod mocks {
             self
         }
 
+        // Seeds the tracks, as (album id, track id, name, disc, track number).
+        // The count of the set is taken from the discs actually seeded.
+        pub fn with_tracks(
+            mut self,
+            tracks: &[(&str, &str, &str, u32, u32)],
+        ) -> MockRemoteInfoProvider {
+            for (album_id, track_id, name, disc_number, track_number) in tracks {
+                self.tracks.push((
+                    album_id.to_string(),
+                    RemoteTrack {
+                        id: track_id.to_string(),
+                        name: name.to_string(),
+                        track_number: *track_number,
+                        disc_number: *disc_number,
+                        total_discs: 0,
+                    },
+                ));
+            }
+
+            self.recount_discs();
+            self
+        }
+
+        // Every track of one album is told the same count of the set, the way
+        // the remote source answers.
+        fn recount_discs(&mut self) {
+            for index in 0..self.tracks.len() {
+                let (album_id, _) = &self.tracks[index];
+
+                let total = self
+                    .tracks
+                    .iter()
+                    .filter(|(owner, _)| owner == album_id)
+                    .map(|(_, track)| track.disc_number)
+                    .max()
+                    .unwrap_or_default();
+
+                self.tracks[index].1.total_discs = total;
+            }
+        }
+
         // A provider that fails every request, to test the network error path.
         pub fn failing(message: &str) -> MockRemoteInfoProvider {
             MockRemoteInfoProvider {
                 universe: Vec::new(),
                 albums: Vec::new(),
+                tracks: Vec::new(),
                 failure: Some(message.to_string()),
             }
         }
@@ -596,6 +850,19 @@ pub mod mocks {
                 .find(|album| album.id == id)
                 .cloned()
                 .ok_or(format!("Unknown album id: {}", id))
+        }
+
+        fn album_tracks(&self, album_id: &str) -> Result<Vec<RemoteTrack>, String> {
+            if let Some(failure) = &self.failure {
+                return Err(failure.clone());
+            }
+
+            Ok(self
+                .tracks
+                .iter()
+                .filter(|(owner, _)| owner == album_id)
+                .map(|(_, track)| track.clone())
+                .collect())
         }
     }
 
@@ -682,6 +949,53 @@ pub mod mocks {
             }
         }
     }
+
+    // The rule a mock track selector applies to every list it is given.
+    pub enum MockTrackChoice {
+        // Picks the head of the ranked list.
+        Best,
+
+        // Skips every file it is asked about.
+        Skip,
+
+        Cancel,
+    }
+
+    pub struct MockTrackSelector {
+        choice: MockTrackChoice,
+
+        // every local file the selector was asked about, in order
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl MockTrackSelector {
+        pub fn new(choice: MockTrackChoice) -> MockTrackSelector {
+            MockTrackSelector {
+                choice,
+                asked: RefCell::new(Vec::new()),
+            }
+        }
+
+        // The files that needed a user, to tell an auto match from a manual one.
+        pub fn asked(&self) -> Vec<String> {
+            self.asked.borrow().clone()
+        }
+    }
+
+    impl super::TrackSelector for MockTrackSelector {
+        fn select(&self, local: &LocalTrack, candidates: &[TrackCandidate]) -> TrackSelection {
+            self.asked.borrow_mut().push(local.name.clone());
+
+            match &self.choice {
+                MockTrackChoice::Skip => TrackSelection::Skip,
+                MockTrackChoice::Cancel => TrackSelection::Cancelled,
+                MockTrackChoice::Best => match candidates.first() {
+                    Some(candidate) => TrackSelection::Chosen(candidate.track.clone()),
+                    None => TrackSelection::Skip,
+                },
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -691,11 +1005,14 @@ mod tests {
         RemoteArtistMeta, RemoteInfoProvider, likeness_percent,
         mocks::{
             MockAlbumChoice, MockAlbumSelector, MockArtistSelector, MockChoice,
-            MockRemoteInfoProvider,
+            MockRemoteInfoProvider, MockTrackChoice, MockTrackSelector,
         },
-        rank_album_candidates, rank_candidates, resolve_album_mapping, resolve_artist_mapping,
-        resolve_remote_album_tags, resolve_remote_name, track_counts_match,
+        rank_album_candidates, rank_candidates, resolve_album_mapping,
+        resolve_album_track_mapping, resolve_artist_mapping, resolve_remote_album_tags,
+        resolve_remote_name, track_counts_match,
     };
+    use super::{LocalTrack, RemoteTrackTags};
+    use std::path::PathBuf;
 
     fn universe() -> MockRemoteInfoProvider {
         MockRemoteInfoProvider::new(&[
@@ -1128,5 +1445,299 @@ mod tests {
             Ok("Revolver (2022 Mix)".to_string())
         );
         assert!(album_universe().album_by_id("nope").is_err());
+    }
+
+    // The tracks of one album, as the mock is seeded with them.
+    const ABBEY_ROAD: &[(&str, &str, &str, u32, u32)] = &[
+        ("2001", "t1", "Come Together", 1, 1),
+        ("2001", "t2", "Something", 1, 2),
+        ("2001", "t3", "Oh! Darling", 1, 3),
+    ];
+
+    fn tracks_provider() -> MockRemoteInfoProvider {
+        MockRemoteInfoProvider::new(&[("1", "Beatles")])
+            .with_albums(&[("1", "2001", "Abbey Road", "1969", 3)])
+            .with_tracks(ABBEY_ROAD)
+    }
+
+    fn locals(names: &[&str]) -> Vec<LocalTrack> {
+        names
+            .iter()
+            .map(|name| LocalTrack {
+                path: PathBuf::from(format!("Beatles/Abbey Road/{}.mp3", name)),
+                name: name.to_string(),
+            })
+            .collect()
+    }
+
+    fn tags_of<'a>(
+        mapping: &'a [(PathBuf, RemoteTrackTags)],
+        name: &str,
+    ) -> Option<&'a RemoteTrackTags> {
+        let path = PathBuf::from(format!("Beatles/Abbey Road/{}.mp3", name));
+
+        mapping
+            .iter()
+            .find(|(local, _)| *local == path)
+            .map(|(_, tags)| tags)
+    }
+
+    #[test]
+    fn names_that_agree_are_matched_without_a_user() {
+        let provider = tracks_provider();
+        let selector = MockTrackSelector::new(MockTrackChoice::Cancel);
+
+        let mapping = resolve_album_track_mapping(
+            "2001",
+            &locals(&["Come Together", "Something", "Oh! Darling"]),
+            &provider,
+            &selector,
+        )
+        .expect("the mapping failed")
+        .expect("the mapping was cancelled");
+
+        // a selector that cancels everything was never reached
+        assert!(selector.asked().is_empty());
+        assert_eq!(mapping.len(), 3);
+
+        let come_together = tags_of(&mapping, "Come Together").expect("no mapping");
+        assert_eq!(come_together.title, "Come Together");
+        assert_eq!(come_together.track_number, "1");
+
+        assert_eq!(tags_of(&mapping, "Something").unwrap().track_number, "2");
+        assert_eq!(tags_of(&mapping, "Oh! Darling").unwrap().track_number, "3");
+    }
+
+    #[test]
+    fn a_name_off_by_one_letter_still_needs_a_user() {
+        let provider = tracks_provider();
+        let selector = MockTrackSelector::new(MockTrackChoice::Best);
+
+        let mapping = resolve_album_track_mapping(
+            "2001",
+            &locals(&["Come Togethr", "Something", "Oh! Darling"]),
+            &provider,
+            &selector,
+        )
+        .expect("the mapping failed")
+        .expect("the mapping was cancelled");
+
+        // "Come Togethr" is 12 of 13 letters, that is 92%, under the bar
+        assert_eq!(selector.asked(), vec!["Come Togethr".to_string()]);
+        assert_eq!(tags_of(&mapping, "Come Togethr").unwrap().title, "Come Together");
+    }
+
+    #[test]
+    fn the_case_of_a_name_is_not_what_tells_two_tracks_apart() {
+        let provider = tracks_provider();
+        let selector = MockTrackSelector::new(MockTrackChoice::Cancel);
+
+        let mapping = resolve_album_track_mapping(
+            "2001",
+            &locals(&["come together"]),
+            &provider,
+            &selector,
+        )
+        .expect("the mapping failed")
+        .expect("the mapping was cancelled");
+
+        assert!(selector.asked().is_empty());
+        assert_eq!(tags_of(&mapping, "come together").unwrap().track_number, "1");
+    }
+
+    #[test]
+    fn one_remote_track_is_taken_by_one_local_file_alone() {
+        let provider = tracks_provider();
+        let selector = MockTrackSelector::new(MockTrackChoice::Best);
+
+        // the same file twice: only one of them can be "Come Together"
+        let mapping = resolve_album_track_mapping(
+            "2001",
+            &locals(&["Come Together", "Come Together (copy)"]),
+            &provider,
+            &selector,
+        )
+        .expect("the mapping failed")
+        .expect("the mapping was cancelled");
+
+        assert_eq!(selector.asked(), vec!["Come Together (copy)".to_string()]);
+
+        let first = tags_of(&mapping, "Come Together").unwrap();
+        let second = tags_of(&mapping, "Come Together (copy)").unwrap();
+
+        assert_eq!(first.track_number, "1");
+        assert_ne!(second.track_number, "1");
+    }
+
+    #[test]
+    fn the_closest_pair_is_matched_first_whatever_the_file_order() {
+        let provider = MockRemoteInfoProvider::new(&[("1", "Beatles")])
+            .with_albums(&[("1", "2001", "Abbey Road", "1969", 2)])
+            .with_tracks(&[
+                ("2001", "t1", "Sun", 1, 1),
+                ("2001", "t2", "Sun King", 1, 2),
+            ]);
+        let selector = MockTrackSelector::new(MockTrackChoice::Cancel);
+
+        // "Sun King" leads, and "Sun" is close enough to it to be taken first
+        // by a greedy pass; only the closest pair first gets both right
+        let mapping = resolve_album_track_mapping(
+            "2001",
+            &locals(&["Sun King", "Sun"]),
+            &provider,
+            &selector,
+        )
+        .expect("the mapping failed")
+        .expect("the mapping was cancelled");
+
+        assert!(selector.asked().is_empty());
+        assert_eq!(tags_of(&mapping, "Sun King").unwrap().track_number, "2");
+        assert_eq!(tags_of(&mapping, "Sun").unwrap().track_number, "1");
+    }
+
+    #[test]
+    fn a_skipped_file_is_left_out_of_the_mapping() {
+        let provider = tracks_provider();
+        let selector = MockTrackSelector::new(MockTrackChoice::Skip);
+
+        let mapping = resolve_album_track_mapping(
+            "2001",
+            &locals(&["Come Together", "Nothing Like It"]),
+            &provider,
+            &selector,
+        )
+        .expect("the mapping failed")
+        .expect("the mapping was cancelled");
+
+        assert_eq!(selector.asked(), vec!["Nothing Like It".to_string()]);
+        assert_eq!(mapping.len(), 1);
+        assert!(tags_of(&mapping, "Come Together").is_some());
+        assert!(tags_of(&mapping, "Nothing Like It").is_none());
+    }
+
+    #[test]
+    fn a_cancel_drops_the_whole_install() {
+        let provider = tracks_provider();
+        let selector = MockTrackSelector::new(MockTrackChoice::Cancel);
+
+        let mapping = resolve_album_track_mapping(
+            "2001",
+            &locals(&["Come Together", "Nothing Like It"]),
+            &provider,
+            &selector,
+        )
+        .expect("the mapping failed");
+
+        // the file matched on its own is dropped as well
+        assert_eq!(mapping, None);
+    }
+
+    #[test]
+    fn more_local_files_than_remote_tracks_empty_the_pool() {
+        let provider = tracks_provider();
+        let selector = MockTrackSelector::new(MockTrackChoice::Best);
+
+        let mapping = resolve_album_track_mapping(
+            "2001",
+            &locals(&["Come Together", "Something", "Oh! Darling", "A Hidden One"]),
+            &provider,
+            &selector,
+        )
+        .expect("the mapping failed")
+        .expect("the mapping was cancelled");
+
+        // nothing is left to offer, so the extra file can only be skipped
+        assert_eq!(selector.asked(), vec!["A Hidden One".to_string()]);
+        assert_eq!(mapping.len(), 3);
+        assert!(tags_of(&mapping, "A Hidden One").is_none());
+    }
+
+    #[test]
+    fn a_set_of_several_discs_carries_its_numbers() {
+        let provider = MockRemoteInfoProvider::new(&[("1", "Beatles")])
+            .with_albums(&[("1", "2001", "The White Album", "1968", 4)])
+            .with_tracks(&[
+                ("2001", "t1", "Back in the U.S.S.R.", 1, 1),
+                ("2001", "t2", "Birthday", 2, 1),
+            ]);
+        let selector = MockTrackSelector::new(MockTrackChoice::Cancel);
+
+        let mapping = resolve_album_track_mapping(
+            "2001",
+            &locals(&["Back in the U.S.S.R.", "Birthday"]),
+            &provider,
+            &selector,
+        )
+        .expect("the mapping failed")
+        .expect("the mapping was cancelled");
+
+        let first = tags_of(&mapping, "Back in the U.S.S.R.").unwrap();
+        let second = tags_of(&mapping, "Birthday").unwrap();
+
+        // both are track one, and only the disc tells them apart
+        assert_eq!(first.track_number, "1");
+        assert_eq!(first.disc_number, "1");
+        assert_eq!(first.total_discs, "2");
+
+        assert_eq!(second.track_number, "1");
+        assert_eq!(second.disc_number, "2");
+        assert_eq!(second.total_discs, "2");
+    }
+
+    #[test]
+    fn a_single_disc_leaves_the_set_empty() {
+        let provider = MockRemoteInfoProvider::new(&[("1", "Beatles")])
+            .with_albums(&[("1", "2001", "Abbey Road", "1969", 1)])
+            .with_tracks(&[("2001", "t1", "Come Together", 0, 1)]);
+        let selector = MockTrackSelector::new(MockTrackChoice::Cancel);
+
+        let mapping =
+            resolve_album_track_mapping("2001", &locals(&["Come Together"]), &provider, &selector)
+                .expect("the mapping failed")
+                .expect("the mapping was cancelled");
+
+        let tags = tags_of(&mapping, "Come Together").unwrap();
+        assert_eq!(tags.disc_number, "");
+        assert_eq!(tags.total_discs, "");
+    }
+
+    #[test]
+    fn a_failing_source_maps_nothing() {
+        let provider = MockRemoteInfoProvider::failing("no network");
+        let selector = MockTrackSelector::new(MockTrackChoice::Best);
+
+        let result =
+            resolve_album_track_mapping("2001", &locals(&["Come Together"]), &provider, &selector);
+
+        assert_eq!(result, Err("no network".to_string()));
+        assert!(selector.asked().is_empty());
+    }
+
+    #[test]
+    fn an_album_of_no_local_files_maps_nothing() {
+        let provider = tracks_provider();
+        let selector = MockTrackSelector::new(MockTrackChoice::Best);
+
+        let mapping = resolve_album_track_mapping("2001", &[], &provider, &selector)
+            .expect("the mapping failed")
+            .expect("the mapping was cancelled");
+
+        assert!(mapping.is_empty());
+        assert!(selector.asked().is_empty());
+    }
+
+    #[test]
+    fn the_album_tags_carry_the_remote_artist() {
+        let provider = tracks_provider();
+        let meta = super::RemoteAlbumMeta::Mapped {
+            id: "2001".to_string(),
+            name: None,
+        };
+
+        let tags = resolve_remote_album_tags(&meta, &provider).expect("lookup failed");
+
+        assert_eq!(tags.name, "Abbey Road");
+        assert_eq!(tags.artist_name, "Beatles");
+        assert_eq!(tags.year, "1969");
     }
 }
