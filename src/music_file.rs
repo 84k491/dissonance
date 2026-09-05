@@ -152,7 +152,7 @@ impl MusicFile {
     }
 
     // [1999] AlbumName
-    fn album_and_year_from_dir_name(dir: &PathBuf) -> Option<(String, Option<u32>)> {
+    pub fn album_and_year_from_dir_name(dir: &PathBuf) -> Option<(String, Option<u32>)> {
         let stem = dir.file_stem();
 
         let stem = if stem.is_some() {

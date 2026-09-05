@@ -239,12 +239,12 @@ impl Directory {
     }
 
     fn recalc_meta(&mut self) {
-        if let Some(album) = self.common_album_meta() {
+        if let Some(album) = self.common_album_meta().or_else(|| self.path_album_meta()) {
             self.meta = DirectoryMetadata::AlbumMeta(album);
             return;
         }
 
-        if let Some(artist) = self.common_artist_meta() {
+        if let Some(artist) = self.common_artist_meta().or_else(|| self.path_artist_meta()) {
             self.meta = DirectoryMetadata::ArtistMeta(artist);
             return;
         }
@@ -270,6 +270,33 @@ impl Directory {
         return ret;
     }
 
+    // The fallback of 'common_album_meta': the files disagree, but a directory
+    // of music files is an album all the same, and the path names it.
+    fn path_album_meta(&self) -> Option<tags::AlbumMetadata> {
+        if self.children.is_empty() {
+            return None;
+        }
+
+        if !self
+            .children
+            .values()
+            .all(|child| matches!(child, FsEntry::FsMusicFile(_)))
+        {
+            return None;
+        }
+
+        let (album_name, year) = MusicFile::album_and_year_from_dir_name(&self.relative_path)?;
+
+        Some(tags::AlbumMetadata {
+            artist: tags::ArtistMetadata {
+                artist: dir_name_of(self.relative_path.parent()?)?,
+            },
+            album_name,
+            year: year.map(|y| y.to_string()).unwrap_or_default(),
+            has_art: false,
+        })
+    }
+
     fn common_artist_meta(&self) -> Option<tags::ArtistMetadata> {
         let mut ret: Option<tags::ArtistMetadata> = None;
 
@@ -291,6 +318,26 @@ impl Directory {
         }
 
         return ret;
+    }
+
+    // The fallback of 'common_artist_meta': the albums disagree, but a
+    // directory of albums is an artist all the same, and the path names it.
+    fn path_artist_meta(&self) -> Option<tags::ArtistMetadata> {
+        if self.children.is_empty() {
+            return None;
+        }
+
+        if !self
+            .children
+            .values()
+            .all(|child| matches!(child, FsEntry::FsDirectory(d) if d.is_album()))
+        {
+            return None;
+        }
+
+        Some(tags::ArtistMetadata {
+            artist: dir_name_of(&self.relative_path)?,
+        })
     }
 
     pub fn empty() -> Directory {
@@ -397,7 +444,8 @@ impl Directory {
         map: &mut RemoteAlbumMappingDatabase,
         remote_artist_name: Option<&str>,
     ) {
-        if let (Some((artist, album)), Some(meta)) = (self.mapped_album_key(), &self.remote_album_meta)
+        if let (Some((artist, album)), Some(meta)) =
+            (self.mapped_album_key(), &self.remote_album_meta)
         {
             let mut artists = vec![artist];
             if let Some(remote) = remote_artist_name {
@@ -928,4 +976,8 @@ mod tests {
         assert_eq!(indexed_song.intention, SyncIntention::Unspecified);
         assert!(!indexed_song.synced);
     }
+}
+
+fn dir_name_of(path: &Path) -> Option<String> {
+    Some(path.file_name()?.to_string_lossy().to_string())
 }
