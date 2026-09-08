@@ -552,22 +552,21 @@ impl Dissonance {
     // The music files of an album, named the way the matching wants them: the
     // file name free of its numbers, because the tags are exactly what is not
     // trusted here.
-    // CLAUDE! can it be an Directory's method? also, in return, can it be not a new struct, but a "MusicFile" ref?
+    //
+    // The nodes are answered with as 'LocalTrack's rather than borrowed: the
+    // matching runs on a thread of its own, so nothing borrowed from the tree
+    // can leave the lock.
     pub fn local_album_tracks(&self, rel_path: &Path) -> Vec<LocalTrack> {
         let files = match self.root_dir.find_recursive(rel_path) {
-            Some(FsEntry::FsDirectory(d)) => d.children_music_files_recursive(),
+            Some(FsEntry::FsDirectory(d)) => d.music_files_recursive(),
             _ => return Vec::new(),
         };
 
         files
             .into_iter()
-            .map(|path| {
-                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-
-                LocalTrack {
-                    name: MusicFile::parse_file_stem(&stem).title,
-                    path,
-                }
+            .map(|mf| LocalTrack {
+                name: mf.title_from_file_name(),
+                path: mf.relative_path.clone(),
             })
             .collect()
     }
@@ -1042,6 +1041,11 @@ impl Dissonance {
             return;
         }
 
+        // what the directories of the old path know, read before they are
+        // dropped. A path holds one artist and one album directory, so this is
+        // a couple of lookups, never a walk of the tree
+        let carried = self.remote_mapping_of_path(&from);
+
         // the old node is forgotten first: adding recalculates the meta of
         // every directory on the way, which reads the tags of every file below
         // them, and the file at the old path is gone from the disk by now. A
@@ -1057,7 +1061,69 @@ impl Dissonance {
             },
         );
 
+        // the directories of the new path were built from nothing and know no
+        // mapping at all; this is what gives them the one of the old path,
+        // which is the same album under the same artist
+        self.restore_remote_mapping_of_path(&to, &carried);
+
         let _ = remove_empty_subdirs::remove_empty_subdirs(&self.source.clone().unwrap());
+    }
+
+    // The mapping of the artist and of the album directory of one file's path,
+    // the nearest one of each first. Absent when the directory that would hold
+    // it was never mapped.
+    fn remote_mapping_of_path(
+        &self,
+        path: &Path,
+    ) -> (Option<RemoteArtistMeta>, Option<RemoteAlbumMeta>) {
+        let mut artist = None;
+        let mut album = None;
+
+        // the ancestors of the file itself, the file left out
+        for dir in path.ancestors().skip(1) {
+            let d = match self.root_dir.find_recursive(dir) {
+                Some(FsEntry::FsDirectory(d)) => d,
+                _ => continue,
+            };
+
+            if artist.is_none() {
+                artist = d.remote_artist_meta().clone();
+            }
+            if album.is_none() {
+                album = d.remote_album_meta().clone();
+            }
+        }
+
+        (artist, album)
+    }
+
+    // Gives the mapping read by 'remote_mapping_of_path' to the directories of
+    // a path that know none. A directory that knows its own is left alone, and
+    // a setter ignores whatever is not of its own level.
+    fn restore_remote_mapping_of_path(
+        &mut self,
+        path: &Path,
+        carried: &(Option<RemoteArtistMeta>, Option<RemoteAlbumMeta>),
+    ) {
+        let (artist, album) = carried;
+
+        for dir in path.ancestors().skip(1) {
+            let (knows_artist, knows_album) = match self.root_dir.find_recursive(dir) {
+                Some(FsEntry::FsDirectory(d)) => (
+                    d.remote_artist_meta().is_some(),
+                    d.remote_album_meta().is_some(),
+                ),
+                _ => continue,
+            };
+
+            if !knows_artist && artist.is_some() {
+                self.root_dir.set_remote_meta_recursive(dir, artist.clone());
+            }
+            if !knows_album && album.is_some() {
+                self.root_dir
+                    .set_remote_album_meta_recursive(dir, album.clone());
+            }
+        }
     }
 
     pub fn fix_characters(&mut self, old_path: &PathBuf) -> Option<PathBuf> {
@@ -2083,6 +2149,74 @@ mod tests {
 
         let album = dir_at(&backend, "The Beatles/[2022] Revolver (2022 Mix)");
         assert!(!album.find_problems().contains(&Problem::MismatchedPath));
+    }
+
+    // Installing the album tags and moving the files onto them is one flow of
+    // two clicks: the mapping has to be there for the second one to be worth
+    // anything, and it was the move itself that used to lose it.
+    #[test]
+    fn a_moved_album_keeps_its_mapping() {
+        let (_dirs, mut backend) = backend_with_a_mapped_artist();
+        map_the_album(&mut backend);
+
+        backend.install_remote_album_tags(
+            Path::new(ALBUM_DIR),
+            &RemoteAlbumTags {
+                name: "Revolver (2022 Mix)".to_string(),
+                artist_name: "The Beatles".to_string(),
+                year: "2022".to_string(),
+            },
+            &BTreeMap::new(),
+        );
+
+        backend.move_entry_to_tag_based_path(PathBuf::from(ALBUM_DIR));
+
+        // the mapping was carried onto the directory the files landed in, the
+        // remote name it had already been told included
+        let moved = "The Beatles/[2022] Revolver (2022 Mix)";
+        assert_eq!(
+            dir_at(&backend, moved).remote_album_meta(),
+            &Some(RemoteAlbumMeta::Mapped {
+                id: "1642995371".to_string(),
+                name: Some("Revolver (2022 Mix)".to_string()),
+            })
+        );
+
+        // and it is the mapping that is written out on closing, not only the
+        // one the node in memory holds
+        let saved = backend.root_dir.create_remote_album_mapping_recursive();
+        assert_eq!(
+            saved.meta_for("The Beatles", "Revolver (2022 Mix)"),
+            Some(RemoteAlbumMeta::Mapped {
+                id: "1642995371".to_string(),
+                name: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_moved_artist_keeps_its_mapping() {
+        let (_dirs, mut backend) = backend_with_a_mapped_artist();
+
+        backend.install_remote_tags(Path::new(ARTIST_DIR), "The Beatles");
+        backend.move_entry_to_tag_based_path(PathBuf::from(ARTIST_DIR));
+
+        assert_eq!(
+            dir_at(&backend, "The Beatles").remote_artist_meta(),
+            &Some(RemoteArtistMeta::Mapped {
+                id: "123456".to_string(),
+                name: Some("The Beatles".to_string()),
+            })
+        );
+
+        let saved = backend.root_dir.create_remote_mapping_recursive();
+        assert_eq!(
+            saved.meta_for("The Beatles"),
+            Some(RemoteArtistMeta::Mapped {
+                id: "123456".to_string(),
+                name: None,
+            })
+        );
     }
 
     #[test]

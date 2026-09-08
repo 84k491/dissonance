@@ -130,6 +130,14 @@ impl MusicFile {
         Some(Self::parse_file_stem(&stem.to_string_lossy()))
     }
 
+    // The title the file name tells, free of the numbers, empty when the name
+    // has no stem at all.
+    pub fn title_from_file_name(&self) -> String {
+        Self::title_and_number_from_file_stem(&self.relative_path)
+            .map(|numbers| numbers.title)
+            .unwrap_or_default()
+    }
+
     // The whole stem is the title whenever the brackets are missing or hold
     // anything but numbers.
     pub fn parse_file_stem(stem: &str) -> StemNumbers {

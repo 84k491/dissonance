@@ -387,6 +387,22 @@ impl Directory {
         return ret;
     }
 
+    // The same files, the nodes themselves in place of a copy of their paths:
+    // what the callers that want the tags as well are after.
+    pub fn music_files_recursive(&self) -> Vec<&MusicFile> {
+        let mut ret = Vec::<&MusicFile>::new();
+
+        for (_, child) in &self.children {
+            match child {
+                FsEntry::FsDirectory(d) => ret.extend(d.music_files_recursive()),
+                FsEntry::FsMusicFile(mf) => ret.push(mf),
+                _ => {}
+            }
+        }
+
+        return ret;
+    }
+
     // Sync info of every music file below this directory, keyed by relative path.
     pub fn create_index_recursive(&self) -> BTreeMap<PathBuf, SyncedEntry> {
         let mut map = BTreeMap::<PathBuf, SyncedEntry>::new();
