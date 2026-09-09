@@ -49,8 +49,8 @@ pub enum Problem {
     MissingTags,
     MismatchedTags,
     MismatchedPath,
-    MissingTrackNumber,
-    MissingYear,
+    MissingTrackNumberInTags,
+    MissingYearInTags,
 }
 
 impl Display for Problem {
@@ -634,7 +634,7 @@ impl Dissonance {
         tags.album = remote.name.clone();
 
         // an empty year means the source told none: emptying the local one
-        // would only turn into a 'MissingYear' problem
+        // would only turn into a 'MissingYearInTags' problem
         if !remote.year.is_empty() {
             tags.year = remote.year.clone();
         }
@@ -877,7 +877,7 @@ impl Dissonance {
                     actions.insert(Action::MoveFile);
                     actions.insert(Action::RemoveTags);
                 }
-                Problem::MissingTrackNumber | Problem::MissingYear => {
+                Problem::MissingTrackNumberInTags | Problem::MissingYearInTags => {
                     actions.insert(Action::RemoveTags);
                     actions.insert(Action::FixTags);
                 }
@@ -2057,12 +2057,12 @@ mod tests {
             "Revolver (2022 Mix)"
         );
 
-        // emptying it would only turn into a 'MissingYear' problem
+        // emptying it would only turn into a 'MissingYearInTags' problem
         assert_eq!(year_tag_of(dirs.source(), FIRST_SONG), "1966");
         assert!(
             !dir_at(&backend, ALBUM_DIR)
                 .find_problems()
-                .contains(&Problem::MissingYear)
+                .contains(&Problem::MissingYearInTags)
         );
     }
 
@@ -2486,9 +2486,10 @@ mod tests {
         .find_problems()
     }
 
-    // The problems of one file laid at a path of the caller's choosing. Its
-    // tags are always complete, so that only the path can be short of anything.
-    fn problems_of_a_file_named(rel: &str) -> BTreeSet<Problem> {
+    // The problems of one file laid at a path of the caller's choosing and
+    // written with the track number and the year of the caller's choosing, so
+    // that either side can be short of either of them.
+    fn problems_of_a_file_named(rel: &str, track_number: &str, year: &str) -> BTreeSet<Problem> {
         redirect_config_dir();
 
         let dirs = TestDirs::new(
@@ -2511,47 +2512,67 @@ mod tests {
         let mut tags = MusicFile::empty_tags();
         tags.artist = "Beatles".to_string();
         tags.album = "Revolver".to_string();
-        tags.year = "1966".to_string();
         tags.title = "Taxman".to_string();
-        tags.track_number = "1".to_string();
+        tags.track_number = track_number.to_string();
+        tags.year = year.to_string();
         read().set_tags(&tags);
 
         // read again, so that the problems are those of the written file
         read().find_problems()
     }
 
+    static COMPLETE_NAME: &str = "Beatles/[1966] Revolver/[01] Taxman.mp3";
+
     #[test]
-    fn a_complete_name_misses_neither_the_number_nor_the_year() {
-        let problems = problems_of_a_file_named("Beatles/[1966] Revolver/[01] Taxman.mp3");
+    fn complete_tags_miss_neither_the_number_nor_the_year() {
+        let problems = problems_of_a_file_named(COMPLETE_NAME, "1", "1966");
 
         assert!(
-            !problems.contains(&Problem::MissingTrackNumber),
+            !problems.contains(&Problem::MissingTrackNumberInTags),
             "unexpected problems: {:?}",
             problems
         );
         assert!(
-            !problems.contains(&Problem::MissingYear),
+            !problems.contains(&Problem::MissingYearInTags),
             "unexpected problems: {:?}",
             problems
         );
     }
 
-    // The tags hold the number, so nothing but the name is short of it.
+    // The path carries both, so the tags are the only side that is short.
     #[test]
-    fn a_file_name_without_a_track_number_misses_it() {
-        let problems = problems_of_a_file_named("Beatles/[1966] Revolver/Taxman.mp3");
+    fn tags_short_of_the_number_and_the_year_miss_them_both() {
+        let problems = problems_of_a_file_named(COMPLETE_NAME, "", "");
 
-        assert!(problems.contains(&Problem::MissingTrackNumber));
-        assert!(!problems.contains(&Problem::MissingYear));
+        assert!(problems.contains(&Problem::MissingTrackNumberInTags));
+        assert!(problems.contains(&Problem::MissingYearInTags));
     }
 
-    // And the year is the album directory's to carry.
+    // A file name that says nothing of a number asks nothing of the tags. What
+    // the user is told of instead is that the path disagrees with them.
     #[test]
-    fn an_album_directory_without_a_year_misses_it() {
-        let problems = problems_of_a_file_named("Beatles/Revolver/[01] Taxman.mp3");
+    fn a_file_name_without_a_track_number_misses_nothing_in_the_tags() {
+        let problems = problems_of_a_file_named("Beatles/[1966] Revolver/Taxman.mp3", "", "1966");
 
-        assert!(problems.contains(&Problem::MissingYear));
-        assert!(!problems.contains(&Problem::MissingTrackNumber));
+        assert!(!problems.contains(&Problem::MissingTrackNumberInTags));
+
+        let with_the_tag =
+            problems_of_a_file_named("Beatles/[1966] Revolver/Taxman.mp3", "1", "1966");
+        assert!(!with_the_tag.contains(&Problem::MissingTrackNumberInTags));
+        assert!(with_the_tag.contains(&Problem::MismatchedPath));
+    }
+
+    // And an album directory without a year asks nothing of the year tag.
+    #[test]
+    fn an_album_directory_without_a_year_misses_nothing_in_the_tags() {
+        let problems = problems_of_a_file_named("Beatles/Revolver/[01] Taxman.mp3", "1", "");
+
+        assert!(!problems.contains(&Problem::MissingYearInTags));
+
+        let with_the_tag =
+            problems_of_a_file_named("Beatles/Revolver/[01] Taxman.mp3", "1", "1966");
+        assert!(!with_the_tag.contains(&Problem::MissingYearInTags));
+        assert!(with_the_tag.contains(&Problem::MismatchedTags));
     }
 
     // A directory has no extension, so a dot in an album name used to cut it

@@ -456,15 +456,17 @@ impl FsEntryTrait for MusicFile {
         path_tags.disc_number = installed_tags.disc_number.clone();
         path_tags.total_discs = installed_tags.total_discs.clone();
 
-        // a number the file name does not carry is as good as missing, whatever
-        // the tags hold: the name is where it has to be seen
-        if installed_tags.track_number.is_empty() || name_tags.track_number.is_empty() {
-            ret.insert(Problem::MissingTrackNumber);
+        // Both of these are about the tags alone. A path that holds no number
+        // of its own is not asked to: what the tags then lack contradicts
+        // nothing, and a path that does disagree is a 'MismatchedTags' or a
+        // 'MismatchedPath', which is what tells the user of it.
+        if installed_tags.track_number.is_empty() && !name_tags.track_number.is_empty() {
+            ret.insert(Problem::MissingTrackNumberInTags);
         }
 
-        // and the year belongs into the name of the album directory above
-        if installed_tags.year.is_empty() || name_tags.year.is_empty() {
-            ret.insert(Problem::MissingYear);
+        // the year is the album directory's to carry
+        if installed_tags.year.is_empty() && !name_tags.year.is_empty() {
+            ret.insert(Problem::MissingYearInTags);
         }
 
         if path_tags != installed_tags {
