@@ -2539,7 +2539,6 @@ mod tests {
         );
     }
 
-    // The path carries both, so the tags are the only side that is short.
     #[test]
     fn tags_short_of_the_number_and_the_year_miss_them_both() {
         let problems = problems_of_a_file_named(COMPLETE_NAME, "", "");
@@ -2548,31 +2547,34 @@ mod tests {
         assert!(problems.contains(&Problem::MissingYearInTags));
     }
 
-    // A file name that says nothing of a number asks nothing of the tags. What
-    // the user is told of instead is that the path disagrees with them.
+    // What the path alone is short of is no problem of this name: an album
+    // directory without a year disagrees with a year tag, and the user is told
+    // of that by 'MismatchedTags'.
     #[test]
-    fn a_file_name_without_a_track_number_misses_nothing_in_the_tags() {
-        let problems = problems_of_a_file_named("Beatles/[1966] Revolver/Taxman.mp3", "", "1966");
+    fn an_album_directory_without_a_year_is_a_mismatch_and_no_more() {
+        static NO_YEAR: &str = "Beatles/Revolver/[01] Taxman.mp3";
 
-        assert!(!problems.contains(&Problem::MissingTrackNumberInTags));
-
-        let with_the_tag =
-            problems_of_a_file_named("Beatles/[1966] Revolver/Taxman.mp3", "1", "1966");
-        assert!(!with_the_tag.contains(&Problem::MissingTrackNumberInTags));
-        assert!(with_the_tag.contains(&Problem::MismatchedPath));
-    }
-
-    // And an album directory without a year asks nothing of the year tag.
-    #[test]
-    fn an_album_directory_without_a_year_misses_nothing_in_the_tags() {
-        let problems = problems_of_a_file_named("Beatles/Revolver/[01] Taxman.mp3", "1", "");
-
-        assert!(!problems.contains(&Problem::MissingYearInTags));
-
-        let with_the_tag =
-            problems_of_a_file_named("Beatles/Revolver/[01] Taxman.mp3", "1", "1966");
+        let with_the_tag = problems_of_a_file_named(NO_YEAR, "1", "1966");
         assert!(!with_the_tag.contains(&Problem::MissingYearInTags));
         assert!(with_the_tag.contains(&Problem::MismatchedTags));
+
+        // and a year no side holds is missing in the tags like any other
+        let without_it = problems_of_a_file_named(NO_YEAR, "1", "");
+        assert!(without_it.contains(&Problem::MissingYearInTags));
+    }
+
+    // The track number of a file name is not compared with the tags at all, so
+    // a name without one leaves a 'MismatchedPath' to be fixed by a move.
+    #[test]
+    fn a_file_name_without_a_track_number_is_a_path_mismatch() {
+        static NO_NUMBER: &str = "Beatles/[1966] Revolver/Taxman.mp3";
+
+        let with_the_tag = problems_of_a_file_named(NO_NUMBER, "1", "1966");
+        assert!(!with_the_tag.contains(&Problem::MissingTrackNumberInTags));
+        assert!(with_the_tag.contains(&Problem::MismatchedPath));
+
+        let without_it = problems_of_a_file_named(NO_NUMBER, "", "1966");
+        assert!(without_it.contains(&Problem::MissingTrackNumberInTags));
     }
 
     // A directory has no extension, so a dot in an album name used to cut it

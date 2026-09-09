@@ -446,8 +446,7 @@ impl FsEntryTrait for MusicFile {
         }
 
         let installed_tags = self.tags();
-        let name_tags = self.compose_tags_from_path();
-        let mut path_tags = name_tags.clone();
+        let mut path_tags = self.compose_tags_from_path();
         path_tags.track_number = installed_tags.track_number.clone();
 
         // the stem carries the disc only on a set of several discs, so it can
@@ -456,16 +455,14 @@ impl FsEntryTrait for MusicFile {
         path_tags.disc_number = installed_tags.disc_number.clone();
         path_tags.total_discs = installed_tags.total_discs.clone();
 
-        // Both of these are about the tags alone. A path that holds no number
-        // of its own is not asked to: what the tags then lack contradicts
-        // nothing, and a path that does disagree is a 'MismatchedTags' or a
-        // 'MismatchedPath', which is what tells the user of it.
-        if installed_tags.track_number.is_empty() && !name_tags.track_number.is_empty() {
+        // Both of these are of the tags alone. A path short of a number of its
+        // own is no problem by this name: it disagrees with the tags, and a
+        // 'MismatchedTags' or a 'MismatchedPath' is what tells the user of it.
+        if installed_tags.track_number.is_empty() {
             ret.insert(Problem::MissingTrackNumberInTags);
         }
 
-        // the year is the album directory's to carry
-        if installed_tags.year.is_empty() && !name_tags.year.is_empty() {
+        if installed_tags.year.is_empty() {
             ret.insert(Problem::MissingYearInTags);
         }
 
