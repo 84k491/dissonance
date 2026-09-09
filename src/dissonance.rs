@@ -2486,6 +2486,74 @@ mod tests {
         .find_problems()
     }
 
+    // The problems of one file laid at a path of the caller's choosing. Its
+    // tags are always complete, so that only the path can be short of anything.
+    fn problems_of_a_file_named(rel: &str) -> BTreeSet<Problem> {
+        redirect_config_dir();
+
+        let dirs = TestDirs::new(
+            &[TestEntry {
+                path: rel,
+                kind: TestEntryKind::MusicFile,
+            }],
+            &[],
+        );
+
+        let read = || {
+            MusicFile::from(
+                &dirs.source().to_path_buf(),
+                &PathBuf::from(rel),
+                SyncIntention::Unspecified,
+            )
+            .expect("not a music file")
+        };
+
+        let mut tags = MusicFile::empty_tags();
+        tags.artist = "Beatles".to_string();
+        tags.album = "Revolver".to_string();
+        tags.year = "1966".to_string();
+        tags.title = "Taxman".to_string();
+        tags.track_number = "1".to_string();
+        read().set_tags(&tags);
+
+        // read again, so that the problems are those of the written file
+        read().find_problems()
+    }
+
+    #[test]
+    fn a_complete_name_misses_neither_the_number_nor_the_year() {
+        let problems = problems_of_a_file_named("Beatles/[1966] Revolver/[01] Taxman.mp3");
+
+        assert!(
+            !problems.contains(&Problem::MissingTrackNumber),
+            "unexpected problems: {:?}",
+            problems
+        );
+        assert!(
+            !problems.contains(&Problem::MissingYear),
+            "unexpected problems: {:?}",
+            problems
+        );
+    }
+
+    // The tags hold the number, so nothing but the name is short of it.
+    #[test]
+    fn a_file_name_without_a_track_number_misses_it() {
+        let problems = problems_of_a_file_named("Beatles/[1966] Revolver/Taxman.mp3");
+
+        assert!(problems.contains(&Problem::MissingTrackNumber));
+        assert!(!problems.contains(&Problem::MissingYear));
+    }
+
+    // And the year is the album directory's to carry.
+    #[test]
+    fn an_album_directory_without_a_year_misses_it() {
+        let problems = problems_of_a_file_named("Beatles/Revolver/[01] Taxman.mp3");
+
+        assert!(problems.contains(&Problem::MissingYear));
+        assert!(!problems.contains(&Problem::MissingTrackNumber));
+    }
+
     // A directory has no extension, so a dot in an album name used to cut it
     // down to its head and no tag could ever agree with the path again.
     #[test]

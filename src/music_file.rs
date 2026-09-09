@@ -446,7 +446,8 @@ impl FsEntryTrait for MusicFile {
         }
 
         let installed_tags = self.tags();
-        let mut path_tags = self.compose_tags_from_path();
+        let name_tags = self.compose_tags_from_path();
+        let mut path_tags = name_tags.clone();
         path_tags.track_number = installed_tags.track_number.clone();
 
         // the stem carries the disc only on a set of several discs, so it can
@@ -455,11 +456,14 @@ impl FsEntryTrait for MusicFile {
         path_tags.disc_number = installed_tags.disc_number.clone();
         path_tags.total_discs = installed_tags.total_discs.clone();
 
-        if installed_tags.track_number.is_empty() {
+        // a number the file name does not carry is as good as missing, whatever
+        // the tags hold: the name is where it has to be seen
+        if installed_tags.track_number.is_empty() || name_tags.track_number.is_empty() {
             ret.insert(Problem::MissingTrackNumber);
         }
 
-        if installed_tags.year.is_empty() {
+        // and the year belongs into the name of the album directory above
+        if installed_tags.year.is_empty() || name_tags.year.is_empty() {
             ret.insert(Problem::MissingYear);
         }
 
