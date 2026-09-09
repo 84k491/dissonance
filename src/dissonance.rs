@@ -51,8 +51,6 @@ pub enum Problem {
     MismatchedPath,
     MissingTrackNumber,
     MissingYear,
-    MissingRemoteArtistMapping,
-    MissingRemoteAlbumMapping,
 }
 
 impl Display for Problem {
@@ -889,8 +887,6 @@ impl Dissonance {
                 Problem::InvalidCharacters => {
                     actions.insert(Action::FixCharacters);
                 }
-                // the mapping actions are picked by the remote meta above
-                Problem::MissingRemoteArtistMapping | Problem::MissingRemoteAlbumMapping => {}
             }
         }
 
@@ -1661,18 +1657,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unmapped_artist_is_problematic_and_offers_the_request() {
+    fn an_unmapped_artist_fires_no_problem_and_offers_the_request() {
         let (_dirs, backend) = backend_with_an_artist();
 
         let artist = dir_at(&backend, ARTIST_DIR);
         assert_eq!(artist.artist_name(), Some("Beatles"));
         assert_eq!(artist.remote_artist_meta(), &None);
-        assert!(artist.has_problems());
-        assert!(
-            artist
-                .find_problems()
-                .contains(&Problem::MissingRemoteArtistMapping)
-        );
+
+        // a missing mapping is not a problem of its own: the request is
+        // offered by the remote meta, and nothing is marked as broken
+        assert!(!artist.has_problems());
 
         let actions = actions_of(&backend, ARTIST_DIR);
         assert!(actions.contains(&Action::MapRemoteTagSource));
@@ -1680,23 +1674,18 @@ mod tests {
         assert!(!actions.contains(&Action::InstallRemoteTags));
 
         // the album below belongs to the same artist, but it is not an artist
-        // directory, so it is neither mapped nor problematic
+        // directory, so it is not mapped
         let album = dir_at(&backend, "Beatles/[1966] Revolver");
         assert!(!album.is_artist());
         assert_eq!(album.artist_name(), Some("Beatles"));
         assert_eq!(album.mapped_artist_name(), None);
-        assert!(
-            !album
-                .find_problems()
-                .contains(&Problem::MissingRemoteArtistMapping)
-        );
 
         let album_actions = actions_of(&backend, "Beatles/[1966] Revolver");
         assert!(!album_actions.contains(&Action::MapRemoteTagSource));
     }
 
     #[test]
-    fn mapping_an_artist_stores_both_names_and_clears_the_problem() {
+    fn mapping_an_artist_stores_both_names() {
         let (_dirs, mut backend) = backend_with_an_artist();
 
         let local_name = backend
@@ -1727,13 +1716,6 @@ mod tests {
         assert!(saved.meta_for("Beatles").is_some());
         assert!(saved.meta_for("The Beatles").is_some());
 
-        let artist = dir_at(&backend, ARTIST_DIR);
-        assert!(
-            !artist
-                .find_problems()
-                .contains(&Problem::MissingRemoteArtistMapping)
-        );
-
         let actions = actions_of(&backend, ARTIST_DIR);
         assert!(actions.contains(&Action::InstallRemoteTags));
         assert!(actions.contains(&Action::ResetRemoteMapping));
@@ -1741,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn no_suitable_fires_no_problem_and_offers_the_reset_only() {
+    fn no_suitable_offers_the_reset_only() {
         let (_dirs, mut backend) = backend_with_an_artist();
 
         let local_name = backend
@@ -1763,11 +1745,6 @@ mod tests {
             artist.remote_artist_meta(),
             &Some(RemoteArtistMeta::NoSuitable)
         );
-        assert!(
-            !artist
-                .find_problems()
-                .contains(&Problem::MissingRemoteArtistMapping)
-        );
 
         let actions = actions_of(&backend, ARTIST_DIR);
         assert!(actions.contains(&Action::ResetRemoteMapping));
@@ -1784,11 +1761,6 @@ mod tests {
 
         let artist = dir_at(&backend, ARTIST_DIR);
         assert_eq!(artist.remote_artist_meta(), &None);
-        assert!(
-            artist
-                .find_problems()
-                .contains(&Problem::MissingRemoteArtistMapping)
-        );
 
         let actions = actions_of(&backend, ARTIST_DIR);
         assert!(actions.contains(&Action::MapRemoteTagSource));
@@ -1889,13 +1861,8 @@ mod tests {
         assert_eq!(album.mapped_album_key(), Some(("Beatles", "Revolver")));
         assert_eq!(album.track_count(), 2);
 
-        // an unmapped album is problematic whether or not its artist is mapped
-        assert!(album.has_problems());
-        assert!(
-            album
-                .find_problems()
-                .contains(&Problem::MissingRemoteAlbumMapping)
-        );
+        // an unmapped album is no problem of its own either
+        assert!(!album.has_problems());
 
         // but there is nothing to search among until the artist is mapped
         assert_eq!(
@@ -1922,9 +1889,8 @@ mod tests {
         assert!(!actions.contains(&Action::ResetRemoteAlbumMapping));
         assert!(!actions.contains(&Action::InstallRemoteAlbumTags));
 
-        // the artist directory above is not an album and is never asked. It
-        // does report the album's problem, because a directory reports the
-        // problems common to its children, but it claims no mapping of its own
+        // the artist directory above is not an album and is never asked: it
+        // claims no album mapping of its own
         let artist = dir_at(&backend, ARTIST_DIR);
         assert_eq!(artist.mapped_album_key(), None);
         assert_eq!(artist.remote_album_meta(), &None);
@@ -1956,13 +1922,6 @@ mod tests {
                 .is_some()
         );
 
-        let album = dir_at(&backend, ALBUM_DIR);
-        assert!(
-            !album
-                .find_problems()
-                .contains(&Problem::MissingRemoteAlbumMapping)
-        );
-
         let actions = actions_of(&backend, ALBUM_DIR);
         assert!(actions.contains(&Action::InstallRemoteAlbumTags));
         assert!(actions.contains(&Action::ResetRemoteAlbumMapping));
@@ -1970,7 +1929,7 @@ mod tests {
     }
 
     #[test]
-    fn album_no_suitable_fires_no_problem_and_offers_the_reset_only() {
+    fn album_no_suitable_offers_the_reset_only() {
         let (_dirs, mut backend) = backend_with_a_mapped_artist();
 
         backend.set_remote_album_mapping(Path::new(ALBUM_DIR), &RemoteAlbumMeta::NoSuitable);
@@ -1979,11 +1938,6 @@ mod tests {
         assert_eq!(
             album.remote_album_meta(),
             &Some(RemoteAlbumMeta::NoSuitable)
-        );
-        assert!(
-            !album
-                .find_problems()
-                .contains(&Problem::MissingRemoteAlbumMapping)
         );
 
         let actions = actions_of(&backend, ALBUM_DIR);
@@ -2015,11 +1969,6 @@ mod tests {
 
         let album = dir_at(&backend, ALBUM_DIR);
         assert_eq!(album.remote_album_meta(), &None);
-        assert!(
-            album
-                .find_problems()
-                .contains(&Problem::MissingRemoteAlbumMapping)
-        );
 
         let actions = actions_of(&backend, ALBUM_DIR);
         assert!(actions.contains(&Action::MapRemoteAlbumTagSource));

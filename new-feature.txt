@@ -28,7 +28,7 @@ If a local name doesn't match completely to a remote one, there will two entries
 Artist mapping can be absent or "no suitable".
 Absent is a starting state, when we didn't requested this mapping (or reset it).
 And "no suitable" is when we already requestsed this mapping and find no suitable option.
-The difference is in available actions. "No suitable" does not provide a "request" action and does not fire a problem.
+The difference is in available actions. "No suitable" does not provide a "request" action.
 
 Absent has no variant of its own: the in-memory type is Option<RemoteArtistMeta>, where None is
 "absent". On disk, absent is a missing key and "no suitable" is { "id": "NoSuitable" }.
@@ -42,8 +42,10 @@ A null id in the file is read as None, that is "absent" as well.
 Only the id is persisted. The remote artist name is re-requested by id when it is needed, and the
 "name" field above is kept on the directory itself, never written to the file.
 
-If an artist don't have a mapping - it must be marked as problematic.
-An artist with such a problem but provide an action "MapRemoteTagSource"
+A missing mapping is not a problem: neither an unmapped artist nor an unmapped album is marked as
+problematic, and there is no "MissingRemoteArtistMapping" / "MissingRemoteAlbumMapping" problem at
+all. A directory without a mapping simply provides the action "MapRemoteTagSource"
+("MapRemoteAlbumTagSource" for an album), which is picked by the remote meta alone.
 
 There can be a local responses cache, but no, we don't implement it now. Every request will be over-net now.
 

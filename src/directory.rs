@@ -198,19 +198,6 @@ impl Directory {
         }
     }
 
-    // An artist directory whose mapping was never requested. Such a directory
-    // is problematic; a "no suitable" one is not.
-    fn is_unmapped_artist(&self) -> bool {
-        self.is_artist() && self.remote_artist_meta.is_none()
-    }
-
-    // An album directory whose mapping was never requested. Problematic just
-    // like an unmapped artist, whether or not the artist above is mapped: the
-    // artist fires a problem of its own and is the thing to fix first.
-    fn is_unmapped_album(&self) -> bool {
-        self.is_album() && self.remote_album_meta.is_none()
-    }
-
     // Reads the mapping of every artist directory below this one out of the
     // database. The database is borrowed, not owned: the tree keeps no handle
     // on it.
@@ -709,10 +696,6 @@ impl FsEntryTrait for Directory {
     }
 
     fn has_problems(&self) -> bool {
-        if self.is_unmapped_artist() || self.is_unmapped_album() {
-            return true;
-        }
-
         for (_, child) in &self.children {
             match child {
                 FsEntry::FsFile(_) => {
@@ -759,14 +742,6 @@ impl FsEntryTrait for Directory {
             }
 
             ret = ret.intersection(&problems).cloned().collect();
-        }
-
-        if self.is_unmapped_artist() {
-            ret.insert(Problem::MissingRemoteArtistMapping);
-        }
-
-        if self.is_unmapped_album() {
-            ret.insert(Problem::MissingRemoteAlbumMapping);
         }
 
         return ret;
