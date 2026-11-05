@@ -1,6 +1,6 @@
 use crate::{
     Problem, SyncIntention, SyncedEntry,
-    music_file::{FsEntryTrait, InvalidFile, MusicFile},
+    music_file::{CoverFile, FsEntryTrait, InvalidFile, MusicFile, is_cover_file},
     remote_tags::{
         RemoteAlbumMappingDatabase, RemoteAlbumMeta, RemoteArtistMappingDatabase, RemoteArtistMeta,
     },
@@ -15,6 +15,7 @@ use std::{
 #[derive(Debug, Clone)]
 pub enum FsEntry {
     FsFile(InvalidFile),
+    FsCoverFile(CoverFile),
     FsMusicFile(MusicFile),
     FsDirectory(Directory),
 }
@@ -30,6 +31,10 @@ impl FsEntry {
         if abs_path.is_dir() {
             let d = Directory::new(&root_path, relative_path, BTreeMap::new());
             return FsEntry::FsDirectory(d);
+        } else if is_cover_file(relative_path) {
+            return FsEntry::FsCoverFile(CoverFile {
+                relative_path: relative_path.clone(),
+            });
         } else {
             let sync_info = SyncedEntry {
                 intention: SyncIntention::Unspecified,
@@ -51,6 +56,7 @@ impl FsEntry {
     pub fn rel_path(&self) -> &PathBuf {
         match &self {
             FsEntry::FsFile(f) => return &f.relative_path,
+            FsEntry::FsCoverFile(c) => return &c.relative_path,
             FsEntry::FsMusicFile(mf) => return &mf.relative_path,
             FsEntry::FsDirectory(d) => return &d.relative_path,
         }
@@ -63,7 +69,7 @@ pub enum DirectoryMetadata {
     None,
 
     // If a directory has this option, than it's an album.
-    // Album contains music files only
+    // Album contains music files only, and 'cover.jpg' maybe
     // All music files must contain the same album metadata
     AlbumMeta(tags::AlbumMetadata),
 
@@ -245,6 +251,7 @@ impl Directory {
         for (_, child) in &self.children {
             let album = match child {
                 FsEntry::FsMusicFile(mf) => tags::AlbumMetadata::get_from_tags(&mf.tags()),
+                FsEntry::FsCoverFile(_) => continue,
                 _ => return None,
             };
 
@@ -260,14 +267,14 @@ impl Directory {
     // The fallback of 'common_album_meta': the files disagree, but a directory
     // of music files is an album all the same, and the path names it.
     fn path_album_meta(&self) -> Option<tags::AlbumMetadata> {
-        if self.children.is_empty() {
+        if self.track_count() == 0 {
             return None;
         }
 
         if !self
             .children
             .values()
-            .all(|child| matches!(child, FsEntry::FsMusicFile(_)))
+            .all(|child| matches!(child, FsEntry::FsMusicFile(_) | FsEntry::FsCoverFile(_)))
         {
             return None;
         }
@@ -280,7 +287,6 @@ impl Directory {
             },
             album_name,
             year: year.map(|y| y.to_string()).unwrap_or_default(),
-            has_art: false,
         })
     }
 
@@ -641,11 +647,18 @@ impl Directory {
         };
     }
 
+    // 'cover.jpg' of an album is left out of its sync state and its problems.
+    // Anywhere else it is an invalid file.
+    fn is_cover_file_of_album(&self, child: &FsEntry) -> bool {
+        matches!(child, FsEntry::FsCoverFile(_)) && self.is_album()
+    }
+
     pub fn intention(&self) -> SyncIntention {
         self.children
             .iter()
+            .filter(|(_, c)| !self.is_cover_file_of_album(c))
             .map(|(_, c)| match c {
-                FsEntry::FsFile(_) => SyncIntention::DropSync,
+                FsEntry::FsFile(_) | FsEntry::FsCoverFile(_) => SyncIntention::DropSync,
                 FsEntry::FsMusicFile(mf) => mf.sync_data.intention.clone(),
                 FsEntry::FsDirectory(d) => d.sync_info().intention,
             })
@@ -674,8 +687,9 @@ impl Directory {
     pub fn synced(&self) -> bool {
         self.children
             .iter()
+            .filter(|(_, c)| !self.is_cover_file_of_album(c))
             .map(|(_, c)| match c {
-                FsEntry::FsFile(_) => false,
+                FsEntry::FsFile(_) | FsEntry::FsCoverFile(_) => false,
                 FsEntry::FsMusicFile(mf) => mf.sync_data.synced,
                 FsEntry::FsDirectory(d) => d.sync_info().synced,
             })
@@ -689,6 +703,7 @@ impl FsEntryTrait for Directory {
         for (_, child) in &mut self.children {
             match child {
                 FsEntry::FsFile(f) => f.set_sync_info(s_data.clone()),
+                FsEntry::FsCoverFile(_) => {}
                 FsEntry::FsDirectory(d) => d.set_sync_info(s_data.clone()),
                 FsEntry::FsMusicFile(mf) => mf.set_sync_info(s_data.clone()),
             }
@@ -697,8 +712,12 @@ impl FsEntryTrait for Directory {
 
     fn has_problems(&self) -> bool {
         for (_, child) in &self.children {
+            if self.is_cover_file_of_album(child) {
+                continue;
+            }
+
             match child {
-                FsEntry::FsFile(_) => {
+                FsEntry::FsFile(_) | FsEntry::FsCoverFile(_) => {
                     return true;
                 }
                 FsEntry::FsDirectory(d) => {
@@ -729,9 +748,14 @@ impl FsEntryTrait for Directory {
         let mut first = true;
 
         for (_, e) in &self.children {
+            if self.is_cover_file_of_album(e) {
+                continue;
+            }
+
             let problems = match e {
                 FsEntry::FsDirectory(d) => d.find_problems(),
                 FsEntry::FsFile(f) => f.find_problems(),
+                FsEntry::FsCoverFile(_) => [Problem::InvalidFile].into_iter().collect(),
                 FsEntry::FsMusicFile(mf) => mf.find_problems(),
             };
 

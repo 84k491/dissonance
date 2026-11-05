@@ -16,6 +16,9 @@ static ALBUM_LIMIT: &str = "200";
 static TRACK_LIMIT: &str = "200";
 static REQUEST_TIMEOUT_SECS: u64 = 15;
 
+// The last part of an artwork url sets the size: '.../100x100bb.jpg'.
+static COVER_SIZE_URL_PART: &str = "1000x1000bb.jpg";
+
 #[derive(Debug, Deserialize)]
 struct RemoteResponse {
     results: Vec<RemoteResult>,
@@ -32,6 +35,7 @@ struct RemoteResult {
     collection_name: Option<String>,
     track_count: Option<u32>,
     release_date: Option<String>,
+    artwork_url100: Option<String>,
 
     // a track is a song; the album listing leads with the album itself, which
     // carries none of these
@@ -122,6 +126,24 @@ impl HttpRemoteInfoProvider {
         Ok(parsed.results)
     }
 
+    fn request_bytes(&self, url: &str) -> Result<Vec<u8>, String> {
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|e| format!("Remote request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!("Remote request failed: {}", response.status()));
+        }
+
+        let bytes = response
+            .bytes()
+            .map_err(|e| format!("Failed to read the remote response: {}", e))?;
+
+        Ok(bytes.to_vec())
+    }
+
     fn request_artists(
         &self,
         url: &str,
@@ -195,6 +217,20 @@ impl RemoteInfoProvider for HttpRemoteInfoProvider {
             LOOKUP_URL,
             &[("id", album_id), ("entity", "song"), ("limit", TRACK_LIMIT)],
         )
+    }
+
+    fn album_cover(&self, album_id: &str) -> Result<Vec<u8>, String> {
+        let artwork_url = self
+            .request(LOOKUP_URL, &[("id", album_id)])?
+            .into_iter()
+            .find_map(|result| result.artwork_url100)
+            .ok_or(format!("No remote cover for album id {}", album_id))?;
+
+        let (base_url, _) = artwork_url
+            .rsplit_once('/')
+            .ok_or(format!("Unexpected remote cover url: {}", artwork_url))?;
+
+        self.request_bytes(&format!("{}/{}", base_url, COVER_SIZE_URL_PART))
     }
 }
 

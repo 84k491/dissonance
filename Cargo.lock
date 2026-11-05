@@ -1125,6 +1125,7 @@ name = "dissonance"
 version = "0.1.0"
 dependencies = [
  "audiotags",
+ "image",
  "pathdiff",
  "remove_empty_subdirs",
  "reqwest",

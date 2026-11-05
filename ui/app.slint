@@ -45,6 +45,7 @@ export component AppWindow inherits Window {
     in property <[TextRow]> info-lines;
     in property <[TextRow]> problems;
     in property <[ActionRow]> actions;
+    in property <image> cover;
 
     // UI -> Rust
     callback source-accepted();
@@ -118,6 +119,13 @@ export component AppWindow inherits Window {
                     for line in root.info-lines: Text {
                         text: line.text;
                     }
+                }
+                Image {
+                    source: root.cover;
+                    height: root.cover.height > 0 ? 200px : 0px;
+                    min-width: 0px;
+                    preferred-width: 0px;
+                    image-fit: contain;
                 }
                 ListView {
                     vertical-stretch: 1;

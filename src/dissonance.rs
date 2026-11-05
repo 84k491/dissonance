@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::directory::load_dir_hash_set_files_only;
 use crate::{
     directory::{Directory, FsEntry},
-    music_file::{FsEntryTrait, InvalidFile, MusicFile},
+    music_file::{
+        COVER_FILE_NAME, CoverFile, CoverImage, FsEntryTrait, InvalidFile, MusicFile,
+        is_cover_file,
+    },
     remote_tags::{
         LocalTrack, RemoteAlbumMappingDatabase, RemoteAlbumMeta, RemoteAlbumTags,
         RemoteArtistMappingDatabase, RemoteArtistMeta, RemoteTrackTags,
@@ -75,6 +78,7 @@ pub enum Action {
     MapRemoteAlbumTagSource,
     ResetRemoteAlbumMapping,
     InstallRemoteAlbumTags,
+    DownloadCoverFile,
 }
 
 impl Display for Action {
@@ -285,6 +289,17 @@ impl Dissonance {
             FsEntry::FsMusicFile(mf) => self.get_suitable_actions_for_music_file(mf),
             FsEntry::FsDirectory(d) => self.get_suitable_actions_for_dir(d),
             FsEntry::FsFile(f) => self.get_suitable_actions_for_invalid_file(f),
+            FsEntry::FsCoverFile(c) => self.get_suitable_actions_for_cover_file(c),
+        }
+    }
+
+    // 'cover.jpg' of an album has no problems, anywhere else it is an invalid file.
+    pub fn find_problems_of_cover_file(&self, cover: &CoverFile) -> BTreeSet<Problem> {
+        let parent = cover.relative_path.parent().unwrap_or(Path::new(""));
+
+        match self.root_dir.find_recursive(parent) {
+            Some(FsEntry::FsDirectory(d)) if d.is_album() => BTreeSet::new(),
+            _ => [Problem::InvalidFile].into_iter().collect(),
         }
     }
 
@@ -576,16 +591,25 @@ impl Dissonance {
     //
     // The files are not moved, so a 'MismatchedPath' may appear and is fixed by
     // 'MoveFile': every part of a path below the root is tag based.
+    //
+    // A cover replaces the one of every file and 'cover.jpg'. Without one, every
+    // file keeps its own.
     pub fn install_remote_album_tags(
         &mut self,
         rel_path: &Path,
         remote: &RemoteAlbumTags,
         tracks: &BTreeMap<PathBuf, RemoteTrackTags>,
+        cover: Option<&CoverImage>,
     ) {
         let files = match self.root_dir.find_recursive(rel_path) {
             Some(FsEntry::FsDirectory(d)) => d.children_music_files_recursive(),
             _ => return,
         };
+
+        // written before the files are read again, so that they see it
+        if let Some(cover) = cover {
+            self.write_cover_file(rel_path, cover);
+        }
 
         for file in files {
             let sync_data = match self.root_dir.find_recursive(&file) {
@@ -593,7 +617,7 @@ impl Dissonance {
                 _ => continue,
             };
 
-            self.write_album_tags(&file, remote, tracks.get(&file));
+            self.write_album_tags(&file, remote, tracks.get(&file), cover);
 
             // read the file again, so that its problems and the meta of every
             // directory above it are recalculated. Only the node of the tree is
@@ -624,6 +648,7 @@ impl Dissonance {
         rel_path: &Path,
         remote: &RemoteAlbumTags,
         track: Option<&RemoteTrackTags>,
+        cover: Option<&CoverImage>,
     ) {
         let mf = match self.root_dir.find_recursive(rel_path) {
             Some(FsEntry::FsMusicFile(mf)) => mf,
@@ -650,7 +675,8 @@ impl Dissonance {
             tags.total_discs = track.total_discs.clone();
         }
 
-        mf.set_tags(&tags);
+        let cover = cover.cloned().or_else(|| mf.cover_image());
+        mf.set_tags_and_cover(&tags, cover.as_ref());
     }
 
     // Replaces the artist of one music file, keeping every other tag of it.
@@ -662,7 +688,61 @@ impl Dissonance {
 
         let mut tags = mf.tags();
         tags.artist = artist.to_string();
-        mf.set_tags(&tags);
+        mf.set_tags_and_cover(&tags, mf.cover_image().as_ref());
+    }
+
+    // 'DownloadCoverFile': replaces 'cover.jpg' of an album.
+    pub fn save_cover_file(&mut self, album_rel_path: &Path, cover: &CoverImage) {
+        if self.write_cover_file(album_rel_path, cover) {
+            self.reread_music_files_of_dir(album_rel_path);
+        }
+    }
+
+    // The files of the album are not read again here.
+    fn write_cover_file(&mut self, album_rel_path: &Path, cover: &CoverImage) -> bool {
+        let cover_rel_path = album_rel_path.join(COVER_FILE_NAME);
+        let cover_abs_path = self.source.clone().unwrap().join(&cover_rel_path);
+
+        if let Err(e) = fs::write(&cover_abs_path, &cover.bytes) {
+            println!("Failed to save a cover file {}: {}", cover_abs_path.display(), e);
+            return false;
+        }
+
+        self.root_dir
+            .add_entry_recursive(&cover_rel_path, Self::unspecified_sync_entry());
+        true
+    }
+
+    fn unspecified_sync_entry() -> SyncedEntry {
+        SyncedEntry {
+            intention: SyncIntention::Unspecified,
+            synced: false,
+        }
+    }
+
+    // A music file checks its cover once, when it is read: after 'cover.jpg'
+    // appears or disappears, every file next to it is read again.
+    fn reread_music_files_of_dir(&mut self, dir_rel_path: &Path) {
+        let files: Vec<(PathBuf, SyncedEntry)> = match self.root_dir.find_recursive(dir_rel_path) {
+            Some(FsEntry::FsDirectory(d)) => d
+                .children()
+                .values()
+                .filter_map(|child| match child {
+                    FsEntry::FsMusicFile(mf) => {
+                        Some((mf.relative_path.clone(), mf.sync_data.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => return,
+        };
+
+        for (file, sync_data) in files {
+            if !self.root_dir.remove_entry_recursive(&file) {
+                println!("Failed to forget file: {}", file.display());
+            }
+            self.root_dir.add_entry_recursive(&file, sync_data);
+        }
     }
 
     pub fn set_sync_intention(&mut self, rel_path: PathBuf, intention: SyncIntention) {
@@ -760,6 +840,16 @@ impl Dissonance {
             if problem == Problem::InvalidFile {
                 actions.insert(Action::DeleteEntry);
             }
+        }
+
+        actions
+    }
+
+    fn get_suitable_actions_for_cover_file(&self, cover: &CoverFile) -> BTreeSet<Action> {
+        let mut actions = BTreeSet::new();
+
+        if self.find_problems_of_cover_file(cover).contains(&Problem::InvalidFile) {
+            actions.insert(Action::DeleteEntry);
         }
 
         actions
@@ -863,6 +953,7 @@ impl Dissonance {
                 Some(RemoteAlbumMeta::Mapped { .. }) => {
                     actions.insert(Action::InstallRemoteAlbumTags);
                     actions.insert(Action::ResetRemoteAlbumMapping);
+                    actions.insert(Action::DownloadCoverFile);
                 }
             }
         }
@@ -910,7 +1001,11 @@ impl Dissonance {
         match entry {
             FsEntry::FsMusicFile(mf) => {
                 let tags = mf.compose_tags_from_path();
-                mf.set_tags(&tags);
+                let cover = match tags.has_art {
+                    true => CoverImage::read_cover_file(&mf.cover_file_abs_path()),
+                    false => None,
+                };
+                mf.set_tags_and_cover(&tags, cover.as_ref());
 
                 let sync_data = mf.sync_data.clone();
 
@@ -971,6 +1066,12 @@ impl Dissonance {
             match fs::remove_file(abs_path) {
                 Ok(()) => {
                     self.root_dir.remove_entry_recursive(&rel_path);
+
+                    if is_cover_file(&rel_path) {
+                        if let Some(dir) = rel_path.parent() {
+                            self.reread_music_files_of_dir(dir);
+                        }
+                    }
                 }
                 Err(e) => {
                     println!("Failed to remove file {}: {}", rel_path.display(), e);
@@ -992,8 +1093,15 @@ impl Dissonance {
                         .collect();
                     let dir_path = d.relative_path.clone();
 
+                    let mut moved_files = Vec::new();
                     for child in children {
-                        self.move_entry_to_tag_based_path(child);
+                        if let Some(new_path) = self.move_entry_to_tag_based_path(child) {
+                            moved_files.push(new_path);
+                        }
+                    }
+
+                    if let Some(new_dir) = moved_files.first().and_then(|p| p.parent()) {
+                        self.carry_cover_file(&dir_path, new_dir);
                     }
 
                     let dir = self
@@ -1021,7 +1129,66 @@ impl Dissonance {
         };
 
         self.move_file(rel_path, tag_based_rel_path.clone());
+        self.save_cover_file_from_tags_of(&tag_based_rel_path);
         Some(tag_based_rel_path)
+    }
+
+    fn save_cover_file_from_tags_of(&mut self, file_rel_path: &Path) {
+        let saved = match self.root_dir.find_recursive(file_rel_path) {
+            Some(FsEntry::FsMusicFile(mf)) => mf.save_cover_file_from_tags(),
+            _ => None,
+        };
+
+        let Some(saved) = saved else {
+            return;
+        };
+
+        self.root_dir
+            .add_entry_recursive(&saved, Self::unspecified_sync_entry());
+
+        if let Some(dir) = saved.parent() {
+            self.reread_music_files_of_dir(dir);
+        }
+    }
+
+    // Moves 'cover.jpg' of a directory whose music files went to 'new_dir',
+    // or deletes it when 'new_dir' has one already.
+    fn carry_cover_file(&mut self, old_dir: &Path, new_dir: &Path) {
+        if old_dir == new_dir {
+            return;
+        }
+
+        let old_cover = old_dir.join(COVER_FILE_NAME);
+        if !matches!(
+            self.root_dir.find_recursive(&old_cover),
+            Some(FsEntry::FsCoverFile(_))
+        ) {
+            return;
+        }
+
+        let source = self.source.clone().unwrap();
+        let new_cover = new_dir.join(COVER_FILE_NAME);
+
+        if source.join(&new_cover).exists() {
+            if let Err(e) = fs::remove_file(source.join(&old_cover)) {
+                println!("Failed to remove {}: {}", old_cover.display(), e);
+                return;
+            }
+        } else {
+            if let Err(e) = fs::rename(source.join(&old_cover), source.join(&new_cover)) {
+                println!("Moving to {:?} failed, err: {}", new_cover, e);
+                return;
+            }
+
+            self.root_dir
+                .add_entry_recursive(&new_cover, Self::unspecified_sync_entry());
+            self.reread_music_files_of_dir(new_dir);
+        }
+
+        self.root_dir.remove_entry_recursive(&old_cover);
+        self.reread_music_files_of_dir(old_dir);
+
+        let _ = remove_empty_subdirs::remove_empty_subdirs(&source);
     }
 
     fn move_file(&mut self, from: PathBuf, to: PathBuf) {
@@ -1146,8 +1313,15 @@ impl Dissonance {
                     .map(|(_, entry)| entry.rel_path().clone())
                     .collect();
 
+                let mut moved_files = Vec::new();
                 for child in children {
-                    self.fix_characters(&child);
+                    if let Some(new_path) = self.fix_characters(&child) {
+                        moved_files.push(new_path);
+                    }
+                }
+
+                if let Some(new_dir) = moved_files.first().and_then(|p| p.parent()) {
+                    self.carry_cover_file(&d.relative_path, new_dir);
                 }
 
                 self.root_dir
@@ -1996,7 +2170,7 @@ mod tests {
         let remote =
             resolve_remote_album_tags(&stored, &remote_album_universe()).expect("no remote tags");
 
-        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &BTreeMap::new());
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &BTreeMap::new(), None);
 
         assert_eq!(
             album_tag_of(dirs.source(), FIRST_SONG),
@@ -2050,6 +2224,7 @@ mod tests {
                 year: String::new(),
             },
             &BTreeMap::new(),
+            None,
         );
 
         assert_eq!(
@@ -2079,6 +2254,7 @@ mod tests {
                 year: "2022".to_string(),
             },
             &BTreeMap::new(),
+            None,
         );
 
         // the files were not moved, so the path no longer matches the tags
@@ -2116,6 +2292,7 @@ mod tests {
                 year: "2022".to_string(),
             },
             &BTreeMap::new(),
+            None,
         );
 
         backend.move_entry_to_tag_based_path(PathBuf::from(ALBUM_DIR));
@@ -2254,7 +2431,7 @@ mod tests {
         let tracks = track_mapping(&backend, &provider, MockTrackChoice::Cancel)
             .expect("the matching was cancelled");
 
-        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks);
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks, None);
 
         let first = tags_of(&backend, FIRST_SONG);
         assert_eq!(first.title, "Taxman");
@@ -2301,7 +2478,7 @@ mod tests {
             .expect("the matching was cancelled");
         assert!(tracks.is_empty());
 
-        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks);
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks, None);
 
         let first = tags_of(&backend, FIRST_SONG);
 
@@ -2333,7 +2510,7 @@ mod tests {
         let tracks = track_mapping(&backend, &provider, MockTrackChoice::Cancel)
             .expect("the matching was cancelled");
 
-        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks);
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks, None);
 
         let first = tags_of(&backend, FIRST_SONG);
         assert_eq!(first.track_number, "1");
@@ -2361,7 +2538,7 @@ mod tests {
         let tracks = track_mapping(&backend, &provider, MockTrackChoice::Cancel)
             .expect("the matching was cancelled");
 
-        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks);
+        backend.install_remote_album_tags(Path::new(ALBUM_DIR), &remote, &tracks, None);
 
         // the files were not moved, so the numbers of their names are stale
         assert!(

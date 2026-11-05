@@ -1,8 +1,10 @@
 use crate::tags::tags::Tags;
 use crate::{Problem, SyncIntention, SyncedEntry};
-use audiotags::{AudioTagEdit, AudioTagWrite, Id3v2Tag, Tag};
+use audiotags::{AudioTagEdit, AudioTagWrite, Id3v2Tag, MimeType, Picture, Tag};
 use std::collections::{BTreeSet, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+pub static COVER_FILE_NAME: &str = "cover.jpg";
 
 pub trait FsEntryTrait {
     fn find_problems(&self) -> BTreeSet<Problem>;
@@ -41,6 +43,57 @@ impl FsEntryTrait for InvalidFile {
     }
     fn set_sync_info(&mut self, _: SyncedEntry) {
         // do nothing
+    }
+}
+
+// 'cover.jpg' of an album directory: the cover of the album, not an invalid file.
+#[derive(Debug, Clone)]
+pub struct CoverFile {
+    pub relative_path: PathBuf,
+}
+
+pub fn is_cover_file(relative: &Path) -> bool {
+    relative.file_name().is_some_and(|name| name == COVER_FILE_NAME)
+}
+
+// The picture itself, as the tags hold it.
+#[derive(Debug, Clone)]
+pub struct CoverImage {
+    pub bytes: Vec<u8>,
+    pub mime_type: MimeType,
+}
+impl CoverImage {
+    pub fn from_jpeg(bytes: Vec<u8>) -> CoverImage {
+        CoverImage {
+            bytes,
+            mime_type: MimeType::Jpeg,
+        }
+    }
+
+    pub fn read_cover_file(cover_file_abs_path: &Path) -> Option<CoverImage> {
+        match std::fs::read(cover_file_abs_path) {
+            Ok(bytes) => Some(Self::from_jpeg(bytes)),
+            Err(e) => {
+                println!(
+                    "Failed to read a cover file {}: {}",
+                    cover_file_abs_path.display(),
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    // 'cover.jpg', 'cover.png', ...
+    pub fn file_name(&self) -> String {
+        let extension = match self.mime_type {
+            MimeType::Jpeg => "jpg",
+            MimeType::Png => "png",
+            MimeType::Tiff => "tiff",
+            MimeType::Bmp => "bmp",
+            MimeType::Gif => "gif",
+        };
+        format!("cover.{}", extension)
     }
 }
 
@@ -279,10 +332,60 @@ impl MusicFile {
             }
         }
 
+        ret.has_art = self.cover_file_abs_path().exists();
+
         ret.remove_slashes();
         ret.remove_invalid_symbols();
 
         return ret;
+    }
+
+    pub fn abs_path(&self) -> PathBuf {
+        self.base_path.join(&self.relative_path)
+    }
+
+    // 'cover.jpg' in the directory of this file, whether it exists or not.
+    pub fn cover_file_abs_path(&self) -> PathBuf {
+        self.abs_path()
+            .parent()
+            .expect("A music file has no parent directory")
+            .join(COVER_FILE_NAME)
+    }
+
+    pub fn cover_image(&self) -> Option<CoverImage> {
+        let tag = Tag::new().read_from_path(self.abs_path()).ok()?;
+        let picture = tag.album_cover()?;
+
+        Some(CoverImage {
+            bytes: picture.data.to_vec(),
+            mime_type: picture.mime_type,
+        })
+    }
+
+    // Saves the cover of the tags as 'cover.<format>' next to this file, unless
+    // 'cover.jpg' is there already. Returns the relative path of the saved file.
+    pub fn save_cover_file_from_tags(&self) -> Option<PathBuf> {
+        if self.cover_file_abs_path().exists() {
+            return None;
+        }
+
+        let cover = self.cover_image()?;
+        let relative_path = self
+            .relative_path
+            .parent()
+            .expect("A music file has no parent directory")
+            .join(cover.file_name());
+
+        if let Err(e) = std::fs::write(self.base_path.join(&relative_path), &cover.bytes) {
+            println!(
+                "Failed to save a cover file {}: {}",
+                relative_path.display(),
+                e
+            );
+            return None;
+        }
+
+        Some(relative_path)
     }
 
     pub fn compose_path_from_tags(&self, input_tags: &Tags) -> PathBuf {
@@ -375,16 +478,26 @@ impl MusicFile {
             ret.year = year.to_string();
         }
 
+        ret.has_art = tag.album_cover().is_some();
+
         ret.remove_slashes();
         ret.remove_invalid_symbols();
         return ret;
     }
 
     pub fn set_tags(&self, tags: &Tags) {
+        self.set_tags_and_cover(tags, None);
+    }
+
+    pub fn set_tags_and_cover(&self, tags: &Tags, cover: Option<&CoverImage>) {
         let mut full_path = self.base_path.clone();
         full_path.push(&self.relative_path);
 
         let mut tag = Box::new(Id3v2Tag::new());
+
+        if let Some(cover) = cover {
+            tag.set_album_cover(Picture::new(&cover.bytes, cover.mime_type));
+        }
 
         tag.remove_album_artist();
         tag.set_title(&tags.title.as_str());
@@ -472,7 +585,8 @@ impl FsEntryTrait for MusicFile {
 
         let tags_path = self.compose_path_from_tags(&installed_tags);
 
-        if self.relative_path != tags_path {
+        // a path has no cover of its own: 'cover.jpg' next to the file is it
+        if self.relative_path != tags_path || path_tags.has_art != installed_tags.has_art {
             ret.insert(Problem::MismatchedPath);
         }
 

@@ -184,6 +184,9 @@ pub trait RemoteInfoProvider: Send + Sync {
 
     // (albumId) -> trackList. Asked once per install, never per file.
     fn album_tracks(&self, album_id: &str) -> Result<Vec<RemoteTrack>, String>;
+
+    // (albumId) -> cover bytes, a jpeg.
+    fn album_cover(&self, album_id: &str) -> Result<Vec<u8>, String>;
 }
 
 pub trait ArtistSelector {
@@ -863,6 +866,14 @@ pub mod mocks {
                 .filter(|(owner, _)| owner == album_id)
                 .map(|(_, track)| track.clone())
                 .collect())
+        }
+
+        fn album_cover(&self, album_id: &str) -> Result<Vec<u8>, String> {
+            if let Some(failure) = &self.failure {
+                return Err(failure.clone());
+            }
+
+            Err(format!("No cover for album id: {}", album_id))
         }
     }
 

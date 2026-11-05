@@ -29,7 +29,6 @@ pub mod tags {
 
         pub album_name: String,
         pub year: String,
-        pub has_art: bool,
     }
     impl AlbumMetadata {
         pub fn get_from_tags(tags: &Tags) -> AlbumMetadata {
@@ -37,7 +36,6 @@ pub mod tags {
                 artist: ArtistMetadata::get_from_tags(tags),
                 album_name: tags.album.clone(),
                 year: tags.year.clone(),
-                has_art: tags.has_art,
             }
         }
     }

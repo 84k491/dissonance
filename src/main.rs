@@ -7,7 +7,7 @@ use std::{
     thread,
 };
 
-use slint::{Color, ModelRc, VecModel, Weak};
+use slint::{Color, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel, Weak};
 
 pub(crate) use crate::directory::FsEntry;
 pub(crate) use crate::dissonance::{Problem, SyncIntention, SyncedEntry};
@@ -21,10 +21,11 @@ use crate::{
         process_filesystem_action,
     },
     itunes::HttpRemoteInfoProvider,
-    music_file::FsEntryTrait,
+    music_file::{CoverImage, FsEntryTrait},
     remote_tags::{
-        RemoteAlbumMeta, RemoteArtistMeta, resolve_album_mapping, resolve_album_track_mapping,
-        resolve_artist_mapping, resolve_remote_album_tags, resolve_remote_name,
+        RemoteAlbumMeta, RemoteArtistMeta, RemoteInfoProvider, resolve_album_mapping,
+        resolve_album_track_mapping, resolve_artist_mapping, resolve_remote_album_tags,
+        resolve_remote_name,
     },
     track_selector::ModalTrackSelector,
 };
@@ -314,6 +315,10 @@ fn on_action_clicked(
                 start_album_mapping(path, weak.clone(), backend.clone(), selected.clone());
                 return;
             }
+            "DownloadCoverFile" => {
+                start_cover_file_download(path, weak.clone(), backend.clone(), selected.clone());
+                return;
+            }
             "InstallRemoteAlbumTags" => {
                 start_remote_album_tags_install(
                     path,
@@ -488,8 +493,45 @@ fn start_remote_album_tags_install(
             Ok(Some(tracks)) => tracks.into_iter().collect::<BTreeMap<_, _>>(),
         };
 
+        // the install goes on without a cover
+        let cover = match provider.album_cover(&album_id) {
+            Err(e) => {
+                println!("Failed to download the album cover: {}", e);
+                None
+            }
+            Ok(bytes) => Some(CoverImage::from_jpeg(bytes)),
+        };
+
         apply_on_ui_thread(weak, backend, selected, move |b| {
-            b.install_remote_album_tags(&path, &remote, &tracks)
+            b.install_remote_album_tags(&path, &remote, &tracks, cover.as_ref())
+        });
+    });
+}
+
+fn start_cover_file_download(
+    path: PathBuf,
+    weak: Weak<AppWindow>,
+    backend: Backend,
+    selected: Selected,
+) {
+    let meta = { backend.lock().unwrap().remote_album_meta(&path) };
+    let Some(RemoteAlbumMeta::Mapped { id: album_id, .. }) = meta else {
+        return;
+    };
+
+    thread::spawn(move || {
+        let provider = HttpRemoteInfoProvider::new();
+
+        let cover = match provider.album_cover(&album_id) {
+            Err(e) => {
+                println!("Failed to download the album cover: {}", e);
+                return;
+            }
+            Ok(bytes) => CoverImage::from_jpeg(bytes),
+        };
+
+        apply_on_ui_thread(weak, backend, selected, move |b| {
+            b.save_cover_file(&path, &cover)
         });
     });
 }
@@ -528,6 +570,43 @@ fn refresh(ui: &AppWindow, backend: &Dissonance, selected: &Option<PathBuf>) {
     ui.set_info_lines(ModelRc::new(VecModel::from(info)));
     ui.set_problems(ModelRc::new(VecModel::from(problems)));
     ui.set_actions(ModelRc::new(VecModel::from(actions)));
+    ui.set_cover(build_cover(backend, selected));
+}
+
+// The cover from the tags of the selected file, or of the first file of the
+// selected album that has one.
+fn build_cover(backend: &Dissonance, selected: &Option<PathBuf>) -> Image {
+    let entry = selected
+        .as_ref()
+        .and_then(|path| backend.root_dir.find_recursive(path));
+
+    let cover = match entry {
+        Some(FsEntry::FsMusicFile(mf)) => mf.cover_image(),
+        Some(FsEntry::FsDirectory(d)) if d.is_album() => d
+            .music_files_recursive()
+            .iter()
+            .find_map(|mf| mf.cover_image()),
+        _ => None,
+    };
+
+    cover.map(|c| decode_cover(&c)).unwrap_or_default()
+}
+
+fn decode_cover(cover: &CoverImage) -> Image {
+    let decoded = match image::load_from_memory(&cover.bytes) {
+        Ok(d) => d.to_rgba8(),
+        Err(e) => {
+            println!("Failed to decode a cover: {}", e);
+            return Image::default();
+        }
+    };
+
+    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        decoded.as_raw(),
+        decoded.width(),
+        decoded.height(),
+    );
+    Image::from_rgba8(buffer)
 }
 
 /// Flatten the (partially expanded) tree into a list of rows, mirroring the
@@ -545,7 +624,9 @@ fn flatten_tree(
         let is_selected = selected.as_ref() == Some(rel_path);
 
         let (label, bg, text_color) = match node {
-            FsEntry::FsFile(_) => (name, Color::from_argb_u8(0, 0, 0, 0), problem_color(false)),
+            FsEntry::FsFile(_) | FsEntry::FsCoverFile(_) => {
+                (name, Color::from_argb_u8(0, 0, 0, 0), problem_color(false))
+            }
             FsEntry::FsMusicFile(f) => {
                 let prefix = if f.sync_data.synced { "" } else { "* " };
                 (
@@ -661,6 +742,9 @@ fn build_panels(
         FsEntry::FsFile(f) => info.push(TextRow {
             text: f.relative_path.display().to_string().into(),
         }),
+        FsEntry::FsCoverFile(c) => info.push(TextRow {
+            text: c.relative_path.display().to_string().into(),
+        }),
         FsEntry::FsDirectory(d) => {
             info.push(TextRow {
                 text: d.relative_path.display().to_string().into(),
@@ -698,6 +782,7 @@ fn build_panels(
         FsEntry::FsMusicFile(mf) => mf.find_problems(),
         FsEntry::FsDirectory(d) => d.find_problems(),
         FsEntry::FsFile(f) => f.find_problems(),
+        FsEntry::FsCoverFile(c) => backend.find_problems_of_cover_file(c),
     };
 
     for problem in found_problems {
