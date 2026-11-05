@@ -579,6 +579,10 @@ impl FsEntryTrait for MusicFile {
             ret.insert(Problem::MissingYearInTags);
         }
 
+        if !path_tags.has_art && !installed_tags.has_art {
+            ret.insert(Problem::NoCover);
+        }
+
         if path_tags != installed_tags {
             ret.insert(Problem::MismatchedTags);
         }

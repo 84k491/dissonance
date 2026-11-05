@@ -54,6 +54,7 @@ pub enum Problem {
     MismatchedPath,
     MissingTrackNumberInTags,
     MissingYearInTags,
+    NoCover,
 }
 
 impl Display for Problem {
@@ -978,6 +979,7 @@ impl Dissonance {
                 Problem::InvalidCharacters => {
                     actions.insert(Action::FixCharacters);
                 }
+                Problem::NoCover => {}
             }
         }
 
