@@ -1363,7 +1363,12 @@ pub fn process_filesystem_action(
         FilesystemAction::Remove(remove_action) => {
             let from_abs = remove_action.base_abs.join(&remove_action.relative);
             println!("Removing: {}", from_abs.display());
-            std::fs::remove_file(&from_abs).unwrap();
+            match std::fs::remove_file(&from_abs) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!("Already removed: {}", from_abs.display());
+                }
+                result => result.unwrap(),
+            }
 
             FilesystemActionReport {
                 action: FilesystemAction::Remove(remove_action.clone()),
